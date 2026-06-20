@@ -54,6 +54,13 @@ const ZOMBIE_DAMAGE = 10
 const MAX_ZOMBIES = 14
 const ARENA = 24
 
+/* Vagues */
+const INTRO_DURATION = 2.0       // durée de l'annonce "VAGUE N"
+const REST_DURATION = 4.0        // répit entre deux vagues
+const WAVE_BASE = 6              // zombies dans la vague 1
+const WAVE_GROWTH = 3            // zombies ajoutés à chaque vague
+function waveCount(n) { return WAVE_BASE + (n - 1) * WAVE_GROWTH }
+
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
 const PUSH_THRESHOLD = 5        // nombre de zombies pour déclencher
@@ -649,7 +656,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const idRef = useRef(1)
   const countRef = useRef(0)
   const spawnTimer = useRef(0)
-  const elapsed = useRef(0)
+
+  // Système de vagues
+  const waveRef = useRef(1)
+  const phaseRef = useRef('intro')      // 'intro' | 'active' | 'rest'
+  const phaseTimer = useRef(0)
+  const quotaRef = useRef(waveCount(1))  // zombies à faire apparaître cette vague
+  const spawnedRef = useRef(0)
+  const killedRef = useRef(0)            // tués cette vague
 
   const hungerRef = useRef(HUNGER_MAX)
   const ammoRef = useRef(START_AMMO)
@@ -664,7 +678,17 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
 
   useEffect(() => { countRef.current = zombies.length }, [zombies])
 
+  const beginWave = (n) => {
+    waveRef.current = n
+    quotaRef.current = waveCount(n)
+    spawnedRef.current = 0
+    killedRef.current = 0
+    phaseRef.current = 'intro'
+    phaseTimer.current = 0
+  }
+
   const killZombies = useCallback((ids) => {
+    killedRef.current += ids.length
     setZombies((zs) => zs.filter((z) => !ids.includes(z.id)))
     onKill(ids.length)
   }, [onKill])
@@ -698,16 +722,39 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     const now = state.clock.elapsedTime
 
     if (playing) {
-      /* Vagues */
-      elapsed.current += dt
-      spawnTimer.current += dt
-      const interval = Math.max(0.9, 2.4 - elapsed.current * 0.02)
-      if (spawnTimer.current >= interval && countRef.current < MAX_ZOMBIES) {
-        spawnTimer.current = 0
-        const a = Math.random() * Math.PI * 2
-        const r = 14 + Math.random() * 5
-        const armored = Math.random() < ARMORED_CHANCE
-        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored }])
+      /* --- Machine à états des vagues --- */
+      const phase = phaseRef.current
+      if (phase === 'intro') {
+        phaseTimer.current += dt
+        if (phaseTimer.current >= INTRO_DURATION) {
+          phaseRef.current = 'active'
+          spawnTimer.current = 0
+        }
+      } else if (phase === 'active') {
+        const wave = waveRef.current
+        const interval = Math.max(0.5, 1.6 - wave * 0.08)
+        if (spawnedRef.current < quotaRef.current) {
+          spawnTimer.current += dt
+          if (spawnTimer.current >= interval && countRef.current < MAX_ZOMBIES) {
+            spawnTimer.current = 0
+            spawnedRef.current += 1
+            const a = Math.random() * Math.PI * 2
+            const r = 14 + Math.random() * 5
+            const armoredChance = Math.min(0.2, 0.04 + wave * 0.015)
+            const armored = Math.random() < armoredChance
+            setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored }])
+          }
+        }
+        // vague terminée : tous apparus ET plus aucun en vie
+        if (spawnedRef.current >= quotaRef.current && countRef.current === 0) {
+          phaseRef.current = 'rest'
+          phaseTimer.current = 0
+        }
+      } else if (phase === 'rest') {
+        phaseTimer.current += dt
+        if (phaseTimer.current >= REST_DURATION) {
+          beginWave(waveRef.current + 1)
+        }
       }
 
       /* Faim + famine */
@@ -773,7 +820,19 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
 
       if (now - lastPush.current > 0.05) {
         lastPush.current = now
-        onSurvival({ hunger: hungerRef.current, search: searchProgress.current, prompt: promptRef.current })
+        const ph = phaseRef.current
+        const wave = waveRef.current
+        let banner = null
+        let countdown = 0
+        if (ph === 'intro') banner = 'VAGUE ' + wave
+        else if (ph === 'rest') { banner = 'VAGUE ' + wave + ' SURVÉCUE'; countdown = Math.ceil(REST_DURATION - phaseTimer.current) }
+        const remaining = Math.max(0, quotaRef.current - killedRef.current)
+        onSurvival({
+          hunger: hungerRef.current,
+          search: searchProgress.current,
+          prompt: promptRef.current,
+          wave, phase: ph, banner, countdown, remaining,
+        })
       }
     }
 
@@ -864,18 +923,43 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, toast }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, toast, wave, banner, countdown, remaining, playing }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
+      <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
+
       <div style={{ position: 'absolute', top: 20, left: 20 }}>
         <Gauge label="SANTÉ" value={health} color={health > 50 ? '#22c55e' : health > 25 ? '#eab308' : '#ef4444'} />
         <Gauge label="FAIM" value={hunger} color={hunger > 50 ? '#f59e0b' : hunger > 20 ? '#fb923c' : '#ef4444'} />
       </div>
 
+      {/* Indicateur de vague (haut-centre) */}
+      {playing && (
+        <div style={{ position: 'absolute', top: 18, left: '50%', transform: 'translateX(-50%)', textAlign: 'center' }}>
+          <div style={{ fontSize: 13, letterSpacing: 4, fontWeight: 700, color: '#fbbf24' }}>VAGUE {wave}</div>
+          {banner === null && (
+            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>{remaining} zombie{remaining > 1 ? 's' : ''} restant{remaining > 1 ? 's' : ''}</div>
+          )}
+        </div>
+      )}
+
       <div style={{ position: 'absolute', top: 20, right: 24, textAlign: 'right' }}>
         <div style={{ fontSize: 12, letterSpacing: 1, opacity: 0.7 }}>ZOMBIES ABATTUS</div>
         <div style={{ fontSize: 34, fontWeight: 700 }}>{score}</div>
       </div>
+
+      {/* Bannière d'annonce de vague */}
+      {playing && banner && (
+        <div key={`${wave}-${banner}`} style={{
+          position: 'absolute', top: '42%', left: '50%', transform: 'translate(-50%, -50%)',
+          textAlign: 'center', animation: 'waveIn 0.4s ease',
+        }}>
+          <div style={{ fontFamily: 'Georgia, serif', fontSize: 'clamp(34px, 6vw, 60px)', fontWeight: 800, letterSpacing: 3, color: '#f8f4ea', textShadow: '0 2px 20px #000' }}>{banner}</div>
+          {countdown > 0 && (
+            <div style={{ fontSize: 18, opacity: 0.8, marginTop: 8 }}>Prochaine vague dans {countdown}…</div>
+          )}
+        </div>
+      )}
 
       <div style={{ position: 'absolute', bottom: 56, left: 20, display: 'flex', gap: 10 }}>
         <WeaponSlot keyLabel="1" name="Sabre" sub="∞" active={weapon === 'sabre'} />
@@ -906,14 +990,75 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
   )
 }
 
-function GameOver({ score, onRestart }) {
+function Panel({ title, children }) {
+  return (
+    <div style={{ flex: '1 1 260px', minWidth: 240, textAlign: 'left', background: '#ffffff0d', border: '1px solid #ffffff14', borderRadius: 12, padding: '16px 20px' }}>
+      <div style={{ fontSize: 12, letterSpacing: 3, opacity: 0.6, marginBottom: 10, color: '#fbbf24' }}>{title}</div>
+      <div style={{ fontSize: 14.5, lineHeight: 1.7, opacity: 0.9 }}>{children}</div>
+    </div>
+  )
+}
+
+function StartScreen({ onPlay }) {
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center', gap: 22, color: '#f3ead7',
+      fontFamily: 'system-ui', textAlign: 'center', padding: 24,
+      background: 'radial-gradient(ellipse at center, #0d0d1299 0%, #07070b 80%)',
+    }}>
+      <div style={{ maxWidth: 720 }}>
+        <div style={{ fontSize: 13, letterSpacing: 6, opacity: 0.6, marginBottom: 10 }}>SURVIE · MORTS-VIVANTS</div>
+        <h1 style={{ margin: 0, fontFamily: 'Georgia, serif', fontSize: 'clamp(40px, 8vw, 76px)', fontWeight: 800, letterSpacing: 2, lineHeight: 1, color: '#f8f4ea' }}>
+          SUPERMARKET<br />SURVIVAL
+        </h1>
+        <div style={{ width: 90, height: 3, background: '#ef4444', margin: '18px auto' }} />
+        <p style={{ margin: 0, fontSize: 17, opacity: 0.8, lineHeight: 1.5 }}>
+          Survivez aux vagues de morts-vivants dans un supermarché abandonné.<br />
+          Fouillez les rayons pour vous armer et vous nourrir. Ne mourez pas de faim.
+        </p>
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, justifyContent: 'center', maxWidth: 720 }}>
+        <Panel title="COMMANDES">
+          Déplacement — ZQSD<br />
+          Viser — Souris<br />
+          Attaquer — Clic / Espace<br />
+          Changer d'arme — 1 / 2<br />
+          Fouiller — E (maintenir)
+        </Panel>
+        <Panel title="SURVIE">
+          Sabre — 2 coups, illimité<br />
+          Pistolet — 1 balle, à trouver<br />
+          Zombie-bob (gilet) — sabre uniquement<br />
+          Faim — fouillez pour manger
+        </Panel>
+      </div>
+
+      <button onClick={onPlay} style={{
+        marginTop: 6, padding: '16px 48px', fontSize: 18, fontWeight: 800, letterSpacing: 2,
+        color: '#fff', background: '#ef4444', border: 'none', borderRadius: 12, cursor: 'pointer',
+        boxShadow: '0 6px 24px #ef444455',
+      }}>
+        JOUER
+      </button>
+    </div>
+  )
+}
+
+function GameOver({ score, onRestart, onMenu }) {
   return (
     <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18, background: '#000000aa', color: '#fff', fontFamily: 'system-ui' }}>
       <div style={{ fontSize: 54, fontWeight: 800, letterSpacing: 2, color: '#ef4444' }}>VOUS ÊTES MORT</div>
       <div style={{ fontSize: 20, opacity: 0.85 }}>Zombies abattus : <b>{score}</b></div>
-      <button onClick={onRestart} style={{ marginTop: 8, padding: '12px 28px', fontSize: 16, fontWeight: 700, color: '#fff', background: '#ef4444', border: 'none', borderRadius: 10, cursor: 'pointer' }}>
-        REJOUER
-      </button>
+      <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+        <button onClick={onRestart} style={{ padding: '12px 28px', fontSize: 16, fontWeight: 700, color: '#fff', background: '#ef4444', border: 'none', borderRadius: 10, cursor: 'pointer' }}>
+          REJOUER
+        </button>
+        <button onClick={onMenu} style={{ padding: '12px 28px', fontSize: 16, fontWeight: 700, color: '#f3ead7', background: '#ffffff14', border: '1px solid #ffffff22', borderRadius: 10, cursor: 'pointer' }}>
+          MENU
+        </button>
+      </div>
     </div>
   )
 }
@@ -922,13 +1067,13 @@ function GameOver({ score, onRestart }) {
 /* App                                                               */
 /* ---------------------------------------------------------------- */
 export default function App() {
-  const [gameState, setGameState] = useState('playing')
+  const [gameState, setGameState] = useState('menu')
   const [health, setHealth] = useState(100)
   const [score, setScore] = useState(0)
   const [weapon, setWeapon] = useState('sabre')
   const [ammo, setAmmo] = useState(START_AMMO)
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
-  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false })
+  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: 0, remaining: WAVE_BASE })
   const [toast, setToast] = useState(null)
   const [gameKey, setGameKey] = useState(0)
   const toastTimer = useRef(null)
@@ -952,20 +1097,21 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 1600)
   }, [])
 
-  const restart = () => {
+  const resetState = () => {
     setHealth(100)
     setScore(0)
     setWeapon('sabre')
     setAmmo(START_AMMO)
     setHasPistol(START_HAS_PISTOL)
-    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false })
+    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: 0, remaining: WAVE_BASE })
     setToast(null)
-    setGameState('playing')
     setGameKey((k) => k + 1)
   }
+  const startGame = () => { resetState(); setGameState('playing') }
+  const gotoMenu = () => { resetState(); setGameState('menu') }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: '#0a0a0d', cursor: 'crosshair' }}>
+    <div style={{ position: 'fixed', inset: 0, background: '#0a0a0d', cursor: gameState === 'playing' ? 'crosshair' : 'default' }}>
       <Canvas shadows camera={{ position: [0, 14, 11], fov: 50 }}>
         <color attach="background" args={['#0d0d12']} />
         <fog attach="fog" args={['#0d0d12', 22, 58]} />
@@ -994,8 +1140,14 @@ export default function App() {
         search={survival.search}
         prompt={survival.prompt}
         toast={toast}
+        wave={survival.wave}
+        banner={survival.banner}
+        countdown={survival.countdown}
+        remaining={survival.remaining}
+        playing={gameState === 'playing'}
       />
-      {gameState === 'gameover' && <GameOver score={score} onRestart={restart} />}
+      {gameState === 'menu' && <StartScreen onPlay={startGame} />}
+      {gameState === 'gameover' && <GameOver score={score} onRestart={startGame} onMenu={gotoMenu} />}
     </div>
   )
 }
