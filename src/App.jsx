@@ -34,6 +34,12 @@ const ZOMBIE_FEET_Y = -0.8          // pieds au sol (sous le centre de la capsul
 const ZOMBIE_MODEL_FACING = 0       // passe à Math.PI si le zombie marche "à reculons"
 useGLTF.preload(ZOMBIE_URL, true)
 
+const PLAYER_URL = '/player_lite.glb'
+const PLAYER_MODEL_SCALE = 1.0      // squelette ~1,67 m
+const PLAYER_FEET_Y = -0.8
+const PLAYER_MODEL_FACING = 0       // passe à Math.PI si le joueur regarde "à l'envers"
+useGLTF.preload(PLAYER_URL, true)
+
 /* ---------------------------------------------------------------- */
 /* Réglages de gameplay                                              */
 /* ---------------------------------------------------------------- */
@@ -431,13 +437,82 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsR
 /* ---------------------------------------------------------------- */
 /* Joueur                                                            */
 /* ---------------------------------------------------------------- */
+/* Modèle 3D animé du joueur (GLB Meshy) */
+function PlayerModel({ locomotionRef, attackRef }) {
+  const { scene, animations } = useGLTF(PLAYER_URL, true)
+  const cloned = useMemo(() => {
+    const c = cloneSkeleton(scene)
+    c.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false } })
+    return c
+  }, [scene])
+  const group = useRef()
+  const { actions } = useAnimations(animations, group)
+  const baseName = useRef(null)        // 'idle' | 'run'
+  const attackName = useRef(null)
+  const attackEnd = useRef(0)
+  const lastTrigger = useRef(0)
+
+  const playBase = (name) => {
+    if (baseName.current === name) return
+    const nextClip = name === 'run' ? 'run' : 'walk'
+    const prevClip = baseName.current === 'run' ? 'run' : 'walk'
+    const next = actions[nextClip]
+    const prev = actions[prevClip]
+    if (next) {
+      next.reset()
+      if (name === 'idle') { next.fadeIn(0.15).play(); next.paused = true; next.time = 0 } // pose figée (pas de clip idle)
+      else { next.paused = false; next.timeScale = 1; next.fadeIn(0.15).play() }
+      if (prev && prev !== next) prev.fadeOut(0.15)
+    }
+    baseName.current = name
+  }
+
+  useEffect(() => {
+    playBase('idle')
+    if (actions.slash) actions.slash.setLoop(THREE.LoopOnce, 1)
+    if (actions.shoot) actions.shoot.setLoop(THREE.LoopOnce, 1)
+    return () => Object.values(actions).forEach((a) => a && a.stop())
+  }, [actions])
+
+  useFrame((state) => {
+    const now = state.clock.elapsedTime
+
+    // nouvelle attaque déclenchée ?
+    if (attackRef.current.id !== lastTrigger.current) {
+      lastTrigger.current = attackRef.current.id
+      const name = attackRef.current.name      // 'slash' | 'shoot'
+      const a = actions[name]
+      if (a) {
+        a.reset(); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = false; a.timeScale = 1
+        a.fadeIn(0.06).play()
+        const baseClip = baseName.current === 'run' ? 'run' : 'walk'
+        if (actions[baseClip]) actions[baseClip].fadeOut(0.06)
+        attackName.current = name
+        attackEnd.current = now + a.getClip().duration
+      }
+    }
+
+    if (attackName.current && now >= attackEnd.current) {
+      const a = actions[attackName.current]
+      if (a) a.fadeOut(0.12)
+      attackName.current = null
+      baseName.current = null            // force la reprise
+      playBase(locomotionRef.current)
+    }
+
+    if (!attackName.current) playBase(locomotionRef.current)
+  })
+
+  return (
+    <group ref={group} position={[0, PLAYER_FEET_Y, 0]} rotation={[0, PLAYER_MODEL_FACING, 0]} scale={PLAYER_MODEL_SCALE}>
+      <primitive object={cloned} />
+    </group>
+  )
+}
+
 function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, hasPistolRef, hungerRef, onWeapon, onAmmo, playing }) {
   const body = useRef()
   const visual = useRef()
-  const sabreVis = useRef()
-  const sabreSwing = useRef()
-  const pistolVis = useRef()
-  const muzzle = useRef()
   const keys = useKeyboard()
   const { camera } = useThree()
 
@@ -445,10 +520,12 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
   const aim = useRef(new THREE.Vector3())
   const weaponRef = useRef('sabre')
   const lastUse = useRef(-10)
-  const swingStart = useRef(-10)
-  const lastShot = useRef(-10)
   const mouseHeld = useRef(false)
   const spaceHeld = useRef(false)
+  const locomotionRef = useRef('idle')
+  const attackRef = useRef({ id: 0, name: 'slash' })
+
+  const triggerAttack = (name) => { attackRef.current = { id: attackRef.current.id + 1, name } }
 
   useEffect(() => {
     const setWeapon = (w) => {
@@ -520,6 +597,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
     } else {
       body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
     }
+    locomotionRef.current = len > 0 ? 'run' : 'idle'
 
     const now = state.clock.elapsedTime
     const weapon = weaponRef.current
@@ -532,8 +610,8 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
 
       if (weapon === 'sabre') {
         lastUse.current = now
-        swingStart.current = now
         Sfx.sabre()
+        triggerAttack('slash')
         const cosHalf = Math.cos(SABRE_HALF_ANGLE)
         const kills = []
         registry.current.forEach((z, id) => {
@@ -543,7 +621,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
           if (d < SABRE_RANGE && d > 0.001) {
             const dot = (vx / d) * fx + (vz / d) * fz
             if (dot > cosHalf && !losBlocked(shelfRectsRef.current, t.x, t.z, z.pos.x, z.pos.z)) {
-              z.hp -= SABRE_DAMAGE        // 1 dégât : 2 coups pour tuer
+              z.hp -= SABRE_DAMAGE
               z.hitFlash = now
               if (z.hp <= 0) kills.push(id)
             }
@@ -552,22 +630,13 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
         if (kills.length) killZombies(kills)
       } else if (ammoRef.current > 0) {
         lastUse.current = now
-        lastShot.current = now
         bulletsRef.current?.fire(t.x + fx * 0.7, t.z + fz * 0.7, fx, fz)
         Sfx.shoot()
+        triggerAttack('shoot')
         ammoRef.current -= 1
         onAmmo(ammoRef.current)
       }
     }
-
-    if (sabreVis.current) sabreVis.current.visible = weapon === 'sabre'
-    if (pistolVis.current) pistolVis.current.visible = weapon === 'pistol'
-    if (sabreSwing.current) {
-      const p = (now - swingStart.current) / SABRE_SWING_DURATION
-      sabreSwing.current.rotation.y = p < 1 ? THREE.MathUtils.lerp(-1.1, 1.1, p) : -0.35
-      sabreSwing.current.rotation.x = p < 1 ? -0.35 : 0.1
-    }
-    if (muzzle.current) muzzle.current.visible = now - lastShot.current < 0.05
   })
 
   return (
@@ -582,38 +651,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
     >
       <CapsuleCollider args={[0.45, 0.4]} />
       <group ref={visual}>
-        <mesh castShadow>
-          <capsuleGeometry args={[0.4, 0.9, 8, 16]} />
-          <meshStandardMaterial color="#3b82f6" />
-        </mesh>
-        <mesh position={[0, 0.9, 0]} castShadow>
-          <sphereGeometry args={[0.28, 16, 16]} />
-          <meshStandardMaterial color="#dbeafe" />
-        </mesh>
-
-        <group ref={sabreVis}>
-          <group ref={sabreSwing} position={[0.35, 0.25, 0.2]}>
-            <mesh position={[0, 0, 0.75]} castShadow>
-              <boxGeometry args={[0.07, 0.07, 1.4]} />
-              <meshStandardMaterial color="#e5e7eb" emissive="#93c5fd" emissiveIntensity={0.45} />
-            </mesh>
-          </group>
-        </group>
-
-        <group ref={pistolVis} visible={false} position={[0.3, 0.15, 0.3]}>
-          <mesh position={[0, -0.08, 0]} castShadow>
-            <boxGeometry args={[0.12, 0.2, 0.14]} />
-            <meshStandardMaterial color="#1f2937" />
-          </mesh>
-          <mesh position={[0, 0.04, 0.18]} castShadow>
-            <boxGeometry args={[0.1, 0.1, 0.36]} />
-            <meshStandardMaterial color="#374151" />
-          </mesh>
-          <mesh ref={muzzle} position={[0, 0.04, 0.42]} visible={false}>
-            <sphereGeometry args={[0.16, 8, 8]} />
-            <meshStandardMaterial color="#fff7ae" emissive="#fde047" emissiveIntensity={3} transparent opacity={0.9} />
-          </mesh>
-        </group>
+        <PlayerModel locomotionRef={locomotionRef} attackRef={attackRef} />
       </group>
     </RigidBody>
   )
