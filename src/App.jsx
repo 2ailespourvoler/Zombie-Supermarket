@@ -40,6 +40,20 @@ const PLAYER_FEET_Y = -0.8
 const PLAYER_MODEL_FACING = 0       // passe à Math.PI si le joueur regarde "à l'envers"
 useGLTF.preload(PLAYER_URL, true)
 
+const SABRE_URL = '/sabre_lite.glb'
+const PISTOL_URL = '/pistol_lite.glb'
+useGLTF.preload(SABRE_URL, true)
+useGLTF.preload(PISTOL_URL, true)
+// Armes attachées à l'os RightHand (échelle monde 0,01) -> holder ×100 = repère en mètres.
+const WEAPON_HOLDER_SCALE = 100
+const SABRE_SCALE = 0.342           // dim native 1,9 -> ~0,65 m
+const SABRE_POS = [0, 0, 0]         // à régler : position dans la main (mètres)
+const SABRE_ROT = [0, 0, 0]         // à régler : orientation de la lame (radians)
+const PISTOL_SCALE = 0.121          // -> ~0,23 m
+const PISTOL_POS = [0, 0, 0]
+const PISTOL_ROT = [0, 0, 0]
+const MUZZLE_POS = [0, 0, 0.2]      // bout du canon (pour le flash)
+
 /* ---------------------------------------------------------------- */
 /* Réglages de gameplay                                              */
 /* ---------------------------------------------------------------- */
@@ -437,20 +451,31 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsR
 /* ---------------------------------------------------------------- */
 /* Joueur                                                            */
 /* ---------------------------------------------------------------- */
-/* Modèle 3D animé du joueur (GLB Meshy) */
-function PlayerModel({ locomotionRef, attackRef }) {
+/* Modèle 3D animé du joueur (GLB Meshy) + armes attachées à la main */
+function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
   const { scene, animations } = useGLTF(PLAYER_URL, true)
+  const sabreGltf = useGLTF(SABRE_URL, true)
+  const pistolGltf = useGLTF(PISTOL_URL, true)
+
   const cloned = useMemo(() => {
     const c = cloneSkeleton(scene)
     c.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false } })
     return c
   }, [scene])
+  const handBone = useMemo(() => {
+    let b = null
+    cloned.traverse((o) => { if (o.name === 'RightHand') b = o })
+    return b
+  }, [cloned])
+
   const group = useRef()
   const { actions } = useAnimations(animations, group)
-  const baseName = useRef(null)        // 'idle' | 'run'
+  const baseName = useRef(null)
   const attackName = useRef(null)
   const attackEnd = useRef(0)
   const lastTrigger = useRef(0)
+  const muzzleUntil = useRef(0)
+  const rig = useRef(null)
 
   const playBase = (name) => {
     if (baseName.current === name) return
@@ -460,7 +485,7 @@ function PlayerModel({ locomotionRef, attackRef }) {
     const prev = actions[prevClip]
     if (next) {
       next.reset()
-      if (name === 'idle') { next.fadeIn(0.15).play(); next.paused = true; next.time = 0 } // pose figée (pas de clip idle)
+      if (name === 'idle') { next.fadeIn(0.15).play(); next.paused = true; next.time = 0 }
       else { next.paused = false; next.timeScale = 1; next.fadeIn(0.15).play() }
       if (prev && prev !== next) prev.fadeOut(0.15)
     }
@@ -474,10 +499,42 @@ function PlayerModel({ locomotionRef, attackRef }) {
     return () => Object.values(actions).forEach((a) => a && a.stop())
   }, [actions])
 
+  // attache les armes à l'os de la main
+  useEffect(() => {
+    const sScene = sabreGltf.scene
+    const pScene = pistolGltf.scene
+    if (!handBone || !sScene || !pScene) return
+    const holder = new THREE.Group()
+    holder.scale.setScalar(WEAPON_HOLDER_SCALE)
+
+    const sabre = sScene.clone(true)
+    sabre.scale.setScalar(SABRE_SCALE)
+    sabre.position.set(...SABRE_POS)
+    sabre.rotation.set(...SABRE_ROT)
+    sabre.traverse((o) => { if (o.isMesh) o.castShadow = true })
+
+    const pistol = pScene.clone(true)
+    pistol.scale.setScalar(PISTOL_SCALE)
+    pistol.position.set(...PISTOL_POS)
+    pistol.rotation.set(...PISTOL_ROT)
+    pistol.traverse((o) => { if (o.isMesh) o.castShadow = true })
+
+    const muzzle = new THREE.Mesh(
+      new THREE.SphereGeometry(0.04, 8, 8),
+      new THREE.MeshStandardMaterial({ color: '#fff7ae', emissive: new THREE.Color('#fde047'), emissiveIntensity: 3, transparent: true, opacity: 0.9 }),
+    )
+    muzzle.position.set(...MUZZLE_POS)
+    muzzle.visible = false
+
+    holder.add(sabre); holder.add(pistol); holder.add(muzzle)
+    handBone.add(holder)
+    rig.current = { sabre, pistol, muzzle }
+    return () => { handBone.remove(holder); rig.current = null }
+  }, [handBone, sabreGltf.scene, pistolGltf.scene])
+
   useFrame((state) => {
     const now = state.clock.elapsedTime
 
-    // nouvelle attaque déclenchée ?
     if (attackRef.current.id !== lastTrigger.current) {
       lastTrigger.current = attackRef.current.id
       const name = attackRef.current.name      // 'slash' | 'shoot'
@@ -490,17 +547,26 @@ function PlayerModel({ locomotionRef, attackRef }) {
         attackName.current = name
         attackEnd.current = now + a.getClip().duration
       }
+      if (name === 'shoot') muzzleUntil.current = now + 0.06
     }
 
     if (attackName.current && now >= attackEnd.current) {
       const a = actions[attackName.current]
       if (a) a.fadeOut(0.12)
       attackName.current = null
-      baseName.current = null            // force la reprise
+      baseName.current = null
       playBase(locomotionRef.current)
     }
-
     if (!attackName.current) playBase(locomotionRef.current)
+
+    // armes : visibilité selon l'arme + flash
+    const r = rig.current
+    if (r) {
+      const isSabre = weaponRef.current === 'sabre'
+      r.sabre.visible = isSabre
+      r.pistol.visible = !isSabre
+      r.muzzle.visible = !isSabre && now < muzzleUntil.current
+    }
   })
 
   return (
@@ -651,7 +717,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
     >
       <CapsuleCollider args={[0.45, 0.4]} />
       <group ref={visual}>
-        <PlayerModel locomotionRef={locomotionRef} attackRef={attackRef} />
+        <PlayerModel locomotionRef={locomotionRef} attackRef={attackRef} weaponRef={weaponRef} />
       </group>
     </RigidBody>
   )
