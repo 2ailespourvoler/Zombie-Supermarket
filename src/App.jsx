@@ -1,23 +1,21 @@
 /**
- * SUPERMARKET SURVIVAL — Phase 5 (loot + faim)
+ * SUPERMARKET SURVIVAL — Phase 5b (combat & physique avancés)
  * ------------------------------------------------------------
  * Stack : React Three Fiber + Rapier
  *
- * Nouveautés par rapport à la Phase 4 :
- *  - FAIM : jauge qui descend toute seule ; à zéro -> famine (perte de
- *    santé). En dessous de 20%, le joueur est ralenti.
- *  - LOOT : on fouille les rayons en maintenant E (barre de progression).
- *    Fouiller immobilise -> on est vulnérable. Bouger annule la fouille.
- *  - 3 types de butin : NOURRITURE (remonte la faim + un peu de santé),
- *    MUNITIONS, et le PISTOLET lui-même (à trouver).
- *  - Le joueur démarre désormais avec le SABRE seul, sans pistolet ni
- *    munitions : il faut fouiller pour s'équiper.
- *  - Indicateurs lumineux au-dessus des rayons qui contiennent du butin.
- *  - CORRECTIF : le sabre teste maintenant la ligne de vue (ne tue plus
- *    à travers un rayon).
+ * Nouveautés par rapport à la Phase 5 :
+ *  1) PV DES ZOMBIES : 2 coups de sabre OU 1 balle pour tuer un zombie
+ *     normal. Flash rouge quand un zombie encaisse un coup non létal.
+ *  2) ZOMBIE-BOB (ex-policier, gilet pare-balles) : 1 sur 20.
+ *     Insensible aux balles (elles ricochent sur le gilet, éclair blanc),
+ *     se tue uniquement au sabre (2 coups).
+ *  3) RAYONS POUSSABLES : si >= 5 zombies poussent une gondole, elle
+ *     glisse lentement (repoussée par la masse). Les rayons sont devenus
+ *     des corps kinematic ; leurs positions vivantes sont relues par la
+ *     ligne de vue, les balles, la fouille et les indicateurs.
  *
- * Optimisation : <Game> est mémoïsé, donc les mises à jour fréquentes du
- * HUD (faim, barre de fouille) ne re-rendent JAMAIS la scène 3D.
+ * Inchangé : loot/fouille, faim/famine, ligne de vue du sabre, HUD,
+ * <Game> mémoïsé pour ne pas re-rendre la scène à chaque tick HUD.
  */
 
 import React, {
@@ -33,6 +31,11 @@ import * as THREE from 'three'
 /* ---------------------------------------------------------------- */
 const PLAYER_SPEED = 6
 const ZOMBIE_SPEED = 2.6
+
+const ZOMBIE_HP = 2
+const SABRE_DAMAGE = 1          // 2 coups de sabre pour tuer
+const BULLET_DAMAGE = 2         // 1 balle pour tuer
+const ARMORED_CHANCE = 0.05     // 1 zombie-bob sur 20
 
 const SABRE_RANGE = 2.6
 const SABRE_HALF_ANGLE = 1.0
@@ -51,12 +54,17 @@ const ZOMBIE_DAMAGE = 10
 const MAX_ZOMBIES = 14
 const ARENA = 24
 
+/* Rayons poussables */
+const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
+const PUSH_THRESHOLD = 5        // nombre de zombies pour déclencher
+const PUSH_SPEED = 1.0          // vitesse de glissement (unités/s)
+
 /* Survie */
 const HUNGER_MAX = 100
-const HUNGER_DRAIN = 0.7        // points/seconde
-const STARVE_TICK = 0.5         // intervalle de dégât de famine
-const STARVE_DAMAGE = 3         // dégât par tick quand faim = 0
-const LOW_HUNGER = 20           // seuil de ralentissement
+const HUNGER_DRAIN = 0.7
+const STARVE_TICK = 0.5
+const STARVE_DAMAGE = 3
+const LOW_HUNGER = 20
 const SLOW_FACTOR = 0.75
 
 /* Loot */
@@ -68,7 +76,7 @@ const AMMO_PICKUP = 8
 const PISTOL_AMMO_BONUS = 6
 const SEARCH_RANGE = 2.7
 const SEARCH_TIME = 1.2
-const SHELF_COOLDOWN = 18        // secondes avant qu'un rayon se réapprovisionne
+const SHELF_COOLDOWN = 18
 
 const SHELVES = [
   { x: -9, z: -7, w: 7, d: 1.6 },
@@ -93,14 +101,12 @@ const camTarget = new THREE.Vector3()
 /* ---------------------------------------------------------------- */
 /* Helpers géométriques                                              */
 /* ---------------------------------------------------------------- */
-// Distance d'un point au rectangle (AABB) — 0 si dedans
 function distToRect(px, pz, cx, cz, hw, hd) {
   const dx = Math.max(Math.abs(px - cx) - hw, 0)
   const dz = Math.max(Math.abs(pz - cz) - hd, 0)
   return Math.hypot(dx, dz)
 }
 
-// Le segment (x1,z1)->(x2,z2) traverse-t-il l'AABB ? (Liang-Barsky 2D)
 function segmentHitsRect(x1, z1, x2, z2, cx, cz, hw, hd) {
   const minx = cx - hw, maxx = cx + hw, minz = cz - hd, maxz = cz + hd
   let t0 = 0, t1 = 1
@@ -118,9 +124,9 @@ function segmentHitsRect(x1, z1, x2, z2, cx, cz, hw, hd) {
   return true
 }
 
-// Ligne de vue bloquée par un rayon ?
-function losBlocked(x1, z1, x2, z2) {
-  for (const s of SHELVES) {
+// Ligne de vue bloquée par un rayon ? (positions vivantes)
+function losBlocked(rects, x1, z1, x2, z2) {
+  for (const s of rects) {
     if (segmentHitsRect(x1, z1, x2, z2, s.x, s.z, s.w / 2, s.d / 2)) return true
   }
   return false
@@ -145,7 +151,7 @@ function useKeyboard() {
 }
 
 /* ---------------------------------------------------------------- */
-/* Caméra 3/4 plongée                                                */
+/* Caméra                                                            */
 /* ---------------------------------------------------------------- */
 function FollowCamera({ target }) {
   const { camera } = useThree()
@@ -159,7 +165,7 @@ function FollowCamera({ target }) {
 }
 
 /* ---------------------------------------------------------------- */
-/* Lumières + décor                                                  */
+/* Lumières + décor fixe (sol + murs)                                */
 /* ---------------------------------------------------------------- */
 function Lights() {
   return (
@@ -194,16 +200,6 @@ function Arena() {
         </mesh>
       </RigidBody>
 
-      {SHELVES.map((s, i) => (
-        <RigidBody key={'s' + i} type="fixed" colliders={false} position={[s.x, 0.6, s.z]}>
-          <CuboidCollider args={[s.w / 2, 0.6, s.d / 2]} />
-          <mesh castShadow receiveShadow>
-            <boxGeometry args={[s.w, 1.2, s.d]} />
-            <meshStandardMaterial color="#6b7280" />
-          </mesh>
-        </RigidBody>
-      ))}
-
       {WALLS.map((w, i) => (
         <RigidBody key={'w' + i} type="fixed" colliders={false} position={[w.x, 1, w.z]}>
           <CuboidCollider args={[w.w / 2, 1, w.d / 2]} />
@@ -218,8 +214,30 @@ function Arena() {
 }
 
 /* ---------------------------------------------------------------- */
-/* Indicateurs de butin au-dessus des rayons                         */
+/* Rayons poussables (kinematic, déplacés par <Game>)               */
 /* ---------------------------------------------------------------- */
+function Shelves({ bodiesRef }) {
+  return (
+    <group>
+      {SHELVES.map((s, i) => (
+        <RigidBody
+          key={i}
+          ref={(el) => (bodiesRef.current[i] = el)}
+          type="kinematicPosition"
+          colliders={false}
+          position={[s.x, 0.6, s.z]}
+        >
+          <CuboidCollider args={[s.w / 2, 0.6, s.d / 2]} />
+          <mesh castShadow receiveShadow>
+            <boxGeometry args={[s.w, 1.2, s.d]} />
+            <meshStandardMaterial color="#6b7280" />
+          </mesh>
+        </RigidBody>
+      ))}
+    </group>
+  )
+}
+
 function LootIndicators({ indicatorsRef }) {
   return (
     <group>
@@ -236,7 +254,7 @@ function LootIndicators({ indicatorsRef }) {
 /* ---------------------------------------------------------------- */
 /* Balles                                                            */
 /* ---------------------------------------------------------------- */
-const Bullets = forwardRef(function Bullets({ registry, killZombies, playing }, ref) {
+const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsRef, playing }, ref) {
   const meshes = useRef([])
   const active = useRef([])
 
@@ -247,20 +265,23 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, playing }, 
     },
   }), [])
 
-  useFrame((_, dt) => {
+  useFrame((state, dt) => {
     const arr = active.current
     if (playing) {
+      const now = state.clock.elapsedTime
       for (let i = arr.length - 1; i >= 0; i--) {
         const b = arr[i]
         b.x += b.dx * BULLET_SPEED * dt
         b.z += b.dz * BULLET_SPEED * dt
         b.life -= dt
         let dead = b.life <= 0 || Math.abs(b.x) > ARENA || Math.abs(b.z) > ARENA
+
         if (!dead) {
-          for (const s of SHELVES) {
+          for (const s of shelfRectsRef.current) {
             if (Math.abs(b.x - s.x) < s.w / 2 && Math.abs(b.z - s.z) < s.d / 2) { dead = true; break }
           }
         }
+
         if (!dead) {
           let hitId = null
           registry.current.forEach((z, id) => {
@@ -269,11 +290,25 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, playing }, 
             const ddz = z.pos.z - b.z
             if (ddx * ddx + ddz * ddz < BULLET_HIT_RADIUS * BULLET_HIT_RADIUS) hitId = id
           })
-          if (hitId !== null) { killZombies([hitId]); dead = true }
+          if (hitId !== null) {
+            const e = registry.current.get(hitId)
+            if (e) {
+              if (e.armored) {
+                e.armorSpark = now            // ricochet sur le gilet, aucun dégât
+              } else {
+                e.hp -= BULLET_DAMAGE
+                e.hitFlash = now
+                if (e.hp <= 0) killZombies([hitId])
+              }
+            }
+            dead = true                       // la balle est consommée dans tous les cas
+          }
         }
+
         if (dead) arr.splice(i, 1)
       }
     }
+
     const m = meshes.current
     for (let i = 0; i < BULLET_POOL; i++) {
       const mesh = m[i]
@@ -302,7 +337,7 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, playing }, 
 /* ---------------------------------------------------------------- */
 /* Joueur                                                            */
 /* ---------------------------------------------------------------- */
-function Player({ posRef, registry, killZombies, bulletsRef, ammoRef, hasPistolRef, hungerRef, onWeapon, onAmmo, playing }) {
+function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, hasPistolRef, hungerRef, onWeapon, onAmmo, playing }) {
   const body = useRef()
   const visual = useRef()
   const sabreVis = useRef()
@@ -323,7 +358,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, ammoRef, hasPistolR
 
   useEffect(() => {
     const setWeapon = (w) => {
-      if (w === 'pistol' && !hasPistolRef.current) return // pas encore trouvé
+      if (w === 'pistol' && !hasPistolRef.current) return
       if (weaponRef.current !== w) { weaponRef.current = w; onWeapon(w) }
     }
     const onKeyDown = (e) => {
@@ -368,7 +403,6 @@ function Player({ posRef, registry, killZombies, bulletsRef, ammoRef, hasPistolR
       return
     }
 
-    /* Visée */
     raycaster.setFromCamera(state.pointer, camera)
     if (raycaster.ray.intersectPlane(groundPlane, aim.current)) {
       const dx = aim.current.x - t.x
@@ -377,7 +411,6 @@ function Player({ posRef, registry, killZombies, bulletsRef, ammoRef, hasPistolR
     }
     if (visual.current) visual.current.rotation.y = yaw.current
 
-    /* Déplacement (avec malus de faim) */
     const k = keys.current
     let mx = 0, mz = 0
     if (k['KeyW'] || k['KeyZ'] || k['ArrowUp']) mz -= 1
@@ -394,7 +427,6 @@ function Player({ posRef, registry, killZombies, bulletsRef, ammoRef, hasPistolR
       body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
     }
 
-    /* Arme */
     const now = state.clock.elapsedTime
     const weapon = weaponRef.current
     const firing = mouseHeld.current || spaceHeld.current
@@ -415,8 +447,11 @@ function Player({ posRef, registry, killZombies, bulletsRef, ammoRef, hasPistolR
           const d = Math.hypot(vx, vz)
           if (d < SABRE_RANGE && d > 0.001) {
             const dot = (vx / d) * fx + (vz / d) * fz
-            // angle dans l'arc ET ligne de vue dégagée (correctif)
-            if (dot > cosHalf && !losBlocked(t.x, t.z, z.pos.x, z.pos.z)) kills.push(id)
+            if (dot > cosHalf && !losBlocked(shelfRectsRef.current, t.x, t.z, z.pos.x, z.pos.z)) {
+              z.hp -= SABRE_DAMAGE        // 1 dégât : 2 coups pour tuer
+              z.hitFlash = now
+              if (z.hp <= 0) kills.push(id)
+            }
           }
         })
         if (kills.length) killZombies(kills)
@@ -429,7 +464,6 @@ function Player({ posRef, registry, killZombies, bulletsRef, ammoRef, hasPistolR
       }
     }
 
-    /* Visuels d'arme */
     if (sabreVis.current) sabreVis.current.visible = weapon === 'sabre'
     if (pistolVis.current) pistolVis.current.visible = weapon === 'pistol'
     if (sabreSwing.current) {
@@ -490,12 +524,17 @@ function Player({ posRef, registry, killZombies, bulletsRef, ammoRef, hasPistolR
 }
 
 /* ---------------------------------------------------------------- */
-/* Zombie                                                            */
+/* Zombie (normal ou blindé)                                         */
 /* ---------------------------------------------------------------- */
-function Zombie({ id, spawn, posRef, registry, onDamage, playing }) {
+function Zombie({ id, spawn, armored, posRef, registry, onDamage, playing }) {
   const body = useRef()
   const visual = useRef()
-  const entry = useRef({ pos: new THREE.Vector3(spawn[0], 1, spawn[1]), lastHit: -10 })
+  const bodyMesh = useRef()
+  const vestMesh = useRef()
+  const entry = useRef({
+    pos: new THREE.Vector3(spawn[0], 1, spawn[1]),
+    lastHit: -10, hp: ZOMBIE_HP, armored, hitFlash: -10, armorSpark: -10,
+  })
 
   useEffect(() => {
     registry.current.set(id, entry.current)
@@ -506,26 +545,35 @@ function Zombie({ id, spawn, posRef, registry, onDamage, playing }) {
     if (!body.current) return
     const t = body.current.translation()
     entry.current.pos.set(t.x, t.y, t.z)
+    const now = state.clock.elapsedTime
 
-    if (!playing) {
+    if (playing) {
+      const dx = posRef.current.x - t.x
+      const dz = posRef.current.z - t.z
+      const d = Math.hypot(dx, dz)
+      const vy = body.current.linvel().y
+      if (d > 0.001) {
+        body.current.setLinvel({ x: (dx / d) * ZOMBIE_SPEED, y: vy, z: (dz / d) * ZOMBIE_SPEED }, true)
+        if (visual.current) visual.current.rotation.y = Math.atan2(dx, dz)
+      }
+      if (d < CONTACT_RANGE && now - entry.current.lastHit > HIT_COOLDOWN) {
+        entry.current.lastHit = now
+        onDamage(ZOMBIE_DAMAGE)
+      }
+    } else {
       const vy = body.current.linvel().y
       body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
-      return
     }
 
-    const dx = posRef.current.x - t.x
-    const dz = posRef.current.z - t.z
-    const d = Math.hypot(dx, dz)
-    const vy = body.current.linvel().y
-    if (d > 0.001) {
-      body.current.setLinvel({ x: (dx / d) * ZOMBIE_SPEED, y: vy, z: (dz / d) * ZOMBIE_SPEED }, true)
-      if (visual.current) visual.current.rotation.y = Math.atan2(dx, dz)
+    // feedback de dégâts (flash rouge) / ricochet (flash blanc sur le gilet)
+    if (bodyMesh.current) {
+      const f = now - entry.current.hitFlash < 0.12
+      bodyMesh.current.material.emissive.setRGB(f ? 0.9 : 0, 0, 0)
     }
-
-    const now = state.clock.elapsedTime
-    if (d < CONTACT_RANGE && now - entry.current.lastHit > HIT_COOLDOWN) {
-      entry.current.lastHit = now
-      onDamage(ZOMBIE_DAMAGE)
+    if (vestMesh.current) {
+      const s = now - entry.current.armorSpark < 0.12
+      const v = s ? 0.9 : 0
+      vestMesh.current.material.emissive.setRGB(v, v, v)
     }
   })
 
@@ -536,36 +584,65 @@ function Zombie({ id, spawn, posRef, registry, onDamage, playing }) {
       position={[spawn[0], 1, spawn[1]]}
       colliders={false}
       enabledRotations={[false, false, false]}
-      mass={1}
+      mass={armored ? 1.6 : 1}
       linearDamping={0.5}
     >
       <CapsuleCollider args={[0.4, 0.4]} />
       <group ref={visual}>
-        <mesh castShadow>
-          <capsuleGeometry args={[0.4, 0.8, 8, 16]} />
-          <meshStandardMaterial color="#5b7d3a" />
-        </mesh>
-        <mesh position={[0, 0.8, 0.1]} castShadow>
-          <sphereGeometry args={[0.26, 12, 12]} />
-          <meshStandardMaterial color="#7d9b54" />
-        </mesh>
-        <mesh position={[0, 0.15, 0.45]} rotation={[1.2, 0, 0]} castShadow>
-          <boxGeometry args={[0.55, 0.16, 0.16]} />
-          <meshStandardMaterial color="#46602e" />
-        </mesh>
+        {armored ? (
+          <>
+            {/* ex-policier */}
+            <mesh ref={bodyMesh} castShadow>
+              <capsuleGeometry args={[0.42, 0.85, 8, 16]} />
+              <meshStandardMaterial color="#27384d" />
+            </mesh>
+            {/* gilet pare-balles */}
+            <mesh ref={vestMesh} position={[0, 0.05, 0]} castShadow>
+              <boxGeometry args={[0.82, 0.62, 0.52]} />
+              <meshStandardMaterial color="#0f0f12" />
+            </mesh>
+            {/* tête */}
+            <mesh position={[0, 0.88, 0.08]} castShadow>
+              <sphereGeometry args={[0.26, 12, 12]} />
+              <meshStandardMaterial color="#8a96a3" />
+            </mesh>
+            {/* casquette */}
+            <mesh position={[0, 1.04, 0.02]} castShadow>
+              <boxGeometry args={[0.5, 0.12, 0.5]} />
+              <meshStandardMaterial color="#10131a" />
+            </mesh>
+          </>
+        ) : (
+          <>
+            <mesh ref={bodyMesh} castShadow>
+              <capsuleGeometry args={[0.4, 0.8, 8, 16]} />
+              <meshStandardMaterial color="#5b7d3a" />
+            </mesh>
+            <mesh position={[0, 0.8, 0.1]} castShadow>
+              <sphereGeometry args={[0.26, 12, 12]} />
+              <meshStandardMaterial color="#7d9b54" />
+            </mesh>
+            <mesh position={[0, 0.15, 0.45]} rotation={[1.2, 0, 0]} castShadow>
+              <boxGeometry args={[0.55, 0.16, 0.16]} />
+              <meshStandardMaterial color="#46602e" />
+            </mesh>
+          </>
+        )}
       </group>
     </RigidBody>
   )
 }
 
 /* ---------------------------------------------------------------- */
-/* Logique de jeu (mémoïsée -> insensible aux re-renders du HUD)     */
+/* Logique de jeu (mémoïsée)                                         */
 /* ---------------------------------------------------------------- */
 const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, onAmmo, onPistol, onSurvival, onPickup }) {
   const playerPos = useRef(new THREE.Vector3(0, 0.9, 0))
   const registry = useRef(new Map())
   const bulletsRef = useRef()
   const indicatorsRef = useRef([])
+  const shelfBodies = useRef([])
+  const shelfRects = useRef(SHELVES.map((s) => ({ x: s.x, z: s.z, w: s.w, d: s.d })))
   const keys = useKeyboard()
 
   const [zombies, setZombies] = useState([])
@@ -574,7 +651,6 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const spawnTimer = useRef(0)
   const elapsed = useRef(0)
 
-  // Inventaire & survie (autoritatifs)
   const hungerRef = useRef(HUNGER_MAX)
   const ammoRef = useRef(START_AMMO)
   const hasPistolRef = useRef(START_HAS_PISTOL)
@@ -622,7 +698,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     const now = state.clock.elapsedTime
 
     if (playing) {
-      /* Apparition par vagues */
+      /* Vagues */
       elapsed.current += dt
       spawnTimer.current += dt
       const interval = Math.max(0.9, 2.4 - elapsed.current * 0.02)
@@ -630,7 +706,8 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         spawnTimer.current = 0
         const a = Math.random() * Math.PI * 2
         const r = 14 + Math.random() * 5
-        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r] }])
+        const armored = Math.random() < ARMORED_CHANCE
+        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored }])
       }
 
       /* Faim + famine */
@@ -642,29 +719,45 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         starveTimer.current = 0
       }
 
-      /* Vitesse du joueur (pour annuler la fouille s'il bouge) */
+      /* Vitesse joueur (annule la fouille s'il bouge) */
       const px = playerPos.current.x, pz = playerPos.current.z
       const moveSpeed = Math.hypot(px - prevX.current, pz - prevZ.current) / Math.max(dt, 1e-4)
       prevX.current = px
       prevZ.current = pz
 
+      /* Rayons poussables : on déplace les positions vivantes */
+      for (let i = 0; i < shelfRects.current.length; i++) {
+        const rect = shelfRects.current[i]
+        let count = 0, ax = 0, az = 0
+        registry.current.forEach((z) => {
+          const d = distToRect(z.pos.x, z.pos.z, rect.x, rect.z, rect.w / 2, rect.d / 2)
+          if (d < PUSH_RANGE) { count++; ax += z.pos.x; az += z.pos.z }
+        })
+        if (count >= PUSH_THRESHOLD) {
+          ax /= count; az /= count
+          let dx = rect.x - ax, dz = rect.z - az
+          const L = Math.hypot(dx, dz) || 1
+          rect.x = THREE.MathUtils.clamp(rect.x + (dx / L) * PUSH_SPEED * dt, -ARENA + 2, ARENA - 2)
+          rect.z = THREE.MathUtils.clamp(rect.z + (dz / L) * PUSH_SPEED * dt, -ARENA + 2, ARENA - 2)
+        }
+      }
+
       /* Réapprovisionnement des rayons */
-      for (let i = 0; i < SHELVES.length; i++) {
+      for (let i = 0; i < shelfStates.current.length; i++) {
         const st = shelfStates.current[i]
         if (!st.available && now >= st.cooldownUntil) st.available = true
       }
 
-      /* Rayon le plus proche disponible */
+      /* Fouille du rayon le plus proche */
       let target = -1, best = Infinity
-      for (let i = 0; i < SHELVES.length; i++) {
+      for (let i = 0; i < shelfRects.current.length; i++) {
         if (!shelfStates.current[i].available) continue
-        const s = SHELVES[i]
+        const s = shelfRects.current[i]
         const d = distToRect(px, pz, s.x, s.z, s.w / 2, s.d / 2)
         if (d < SEARCH_RANGE && d < best) { best = d; target = i }
       }
       promptRef.current = target !== -1
 
-      /* Fouille (E maintenu, immobile) */
       if (target !== -1 && keys.current['KeyE'] && moveSpeed < 1.0) {
         searchProgress.current += dt / SEARCH_TIME
         if (searchProgress.current >= 1) {
@@ -678,21 +771,28 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         searchProgress.current = 0
       }
 
-      /* Push HUD throttlé (~20 Hz) -> ne re-rend que le HUD, pas la scène */
       if (now - lastPush.current > 0.05) {
         lastPush.current = now
         onSurvival({ hunger: hungerRef.current, search: searchProgress.current, prompt: promptRef.current })
       }
     }
 
-    /* Indicateurs de butin (visibilité + animation) */
-    for (let i = 0; i < SHELVES.length; i++) {
+    /* Synchronise les corps kinematic des rayons (toujours) */
+    for (let i = 0; i < shelfBodies.current.length; i++) {
+      const b = shelfBodies.current[i]
+      const rect = shelfRects.current[i]
+      if (b && rect) b.setNextKinematicTranslation({ x: rect.x, y: 0.6, z: rect.z })
+    }
+
+    /* Indicateurs de butin (suivent les rayons) */
+    for (let i = 0; i < indicatorsRef.current.length; i++) {
       const ind = indicatorsRef.current[i]
-      if (!ind) continue
+      const rect = shelfRects.current[i]
+      if (!ind || !rect) continue
       const avail = shelfStates.current[i].available
       ind.visible = avail
       if (avail) {
-        ind.position.y = 1.7 + Math.sin(now * 3 + i) * 0.12
+        ind.position.set(rect.x, 1.7 + Math.sin(now * 3 + i) * 0.12, rect.z)
         ind.rotation.y = now * 1.5
       }
     }
@@ -703,13 +803,15 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       <FollowCamera target={playerPos} />
       <Lights />
       <Arena />
+      <Shelves bodiesRef={shelfBodies} />
       <LootIndicators indicatorsRef={indicatorsRef} />
-      <Bullets ref={bulletsRef} registry={registry} killZombies={killZombies} playing={playing} />
+      <Bullets ref={bulletsRef} registry={registry} killZombies={killZombies} shelfRectsRef={shelfRects} playing={playing} />
       <Player
         posRef={playerPos}
         registry={registry}
         killZombies={killZombies}
         bulletsRef={bulletsRef}
+        shelfRectsRef={shelfRects}
         ammoRef={ammoRef}
         hasPistolRef={hasPistolRef}
         hungerRef={hungerRef}
@@ -722,6 +824,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           key={z.id}
           id={z.id}
           spawn={z.spawn}
+          armored={z.armored}
           posRef={playerPos}
           registry={registry}
           onDamage={onDamage}
@@ -779,15 +882,10 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
         <WeaponSlot keyLabel="2" name="Pistolet" sub={ammo} danger={ammo === 0} active={weapon === 'pistol'} locked={!hasPistol} />
       </div>
 
-      {/* Toast de ramassage */}
       {toast && (
-        <div style={{
-          position: 'absolute', top: 90, left: '50%', transform: 'translateX(-50%)',
-          padding: '8px 18px', background: '#000000bb', borderRadius: 10, fontWeight: 600, fontSize: 15,
-        }}>{toast}</div>
+        <div style={{ position: 'absolute', top: 90, left: '50%', transform: 'translateX(-50%)', padding: '8px 18px', background: '#000000bb', borderRadius: 10, fontWeight: 600, fontSize: 15 }}>{toast}</div>
       )}
 
-      {/* Fouille */}
       {search > 0 ? (
         <div style={{ position: 'absolute', bottom: 110, left: '50%', transform: 'translateX(-50%)', textAlign: 'center' }}>
           <div style={{ fontSize: 13, opacity: 0.8, marginBottom: 6 }}>Fouille en cours…</div>
@@ -810,10 +908,7 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
 
 function GameOver({ score, onRestart }) {
   return (
-    <div style={{
-      position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-      alignItems: 'center', justifyContent: 'center', gap: 18, background: '#000000aa', color: '#fff', fontFamily: 'system-ui',
-    }}>
+    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18, background: '#000000aa', color: '#fff', fontFamily: 'system-ui' }}>
       <div style={{ fontSize: 54, fontWeight: 800, letterSpacing: 2, color: '#ef4444' }}>VOUS ÊTES MORT</div>
       <div style={{ fontSize: 20, opacity: 0.85 }}>Zombies abattus : <b>{score}</b></div>
       <button onClick={onRestart} style={{ marginTop: 8, padding: '12px 28px', fontSize: 16, fontWeight: 700, color: '#fff', background: '#ef4444', border: 'none', borderRadius: 10, cursor: 'pointer' }}>
