@@ -48,8 +48,8 @@ useGLTF.preload(PISTOL_URL, true)
 const WEAPON_HOLDER_SCALE = 100
 const SABRE_SCALE = 0.342           // dim native 1,9 -> ~0,65 m
 const SABRE_POS = [0, 0, 0]         // à régler : position dans la main (mètres)
-const SABRE_ROT = [0, 0, 0]         // à régler : orientation de la lame (radians)
-const PISTOL_SCALE = 0.121          // -> ~0,23 m
+const SABRE_ROT = [0.205, 0.118, -0.716] // lame dans l'axe du bras au repos (calculé par PCA)
+const PISTOL_SCALE = 0.182          // -> ~0,35 m (agrandi de 50 %)
 const PISTOL_POS = [0, 0, 0]
 const PISTOL_ROT = [0, 0, 0]
 const MUZZLE_POS = [0, 0, 0.2]      // bout du canon (pour le flash)
@@ -82,12 +82,12 @@ const ZOMBIE_DAMAGE = 10
 const MAX_ZOMBIES = 14
 const ARENA = 24
 
-/* Vagues */
-const INTRO_DURATION = 2.0       // durée de l'annonce "VAGUE N"
-const REST_DURATION = 4.0        // répit entre deux vagues
-const WAVE_BASE = 6              // zombies dans la vague 1
-const WAVE_GROWTH = 3            // zombies ajoutés à chaque vague
-function waveCount(n) { return WAVE_BASE + (n - 1) * WAVE_GROWTH }
+/* Vagues — arrivée continue, rythmée par le temps (la pression ne retombe jamais) */
+const WAVE_DURATION = 22         // durée d'une vague avant de passer à la suivante (s)
+const BANNER_DURATION = 2.2      // durée d'affichage de l'annonce "VAGUE N"
+const SPAWN_BASE = 1.5           // intervalle de spawn de base (s)
+const SPAWN_STEP = 0.07          // l'intervalle se réduit à chaque vague
+const SPAWN_MIN = 0.45           // intervalle minimal (cadence max)
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -907,13 +907,10 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const countRef = useRef(0)
   const spawnTimer = useRef(0)
 
-  // Système de vagues
+  // Système de vagues — continu, rythmé par le temps
   const waveRef = useRef(1)
-  const phaseRef = useRef('intro')      // 'intro' | 'active' | 'rest'
-  const phaseTimer = useRef(0)
-  const quotaRef = useRef(waveCount(1))  // zombies à faire apparaître cette vague
-  const spawnedRef = useRef(0)
-  const killedRef = useRef(0)            // tués cette vague
+  const waveTimer = useRef(0)
+  const bannerUntil = useRef(BANNER_DURATION)
 
   const hungerRef = useRef(HUNGER_MAX)
   const ammoRef = useRef(START_AMMO)
@@ -931,19 +928,8 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   useEffect(() => { countRef.current = zombies.filter((z) => !z.dying).length }, [zombies])
   useEffect(() => { if (playing) Sfx.waveStart() }, [])
 
-  const beginWave = (n) => {
-    waveRef.current = n
-    quotaRef.current = waveCount(n)
-    spawnedRef.current = 0
-    killedRef.current = 0
-    phaseRef.current = 'intro'
-    phaseTimer.current = 0
-    Sfx.waveStart()
-  }
-
   // coup fatal : on marque "mourant" (le corps joue sa mort), score compté tout de suite
   const killZombies = useCallback((ids) => {
-    killedRef.current += ids.length
     onKill(ids.length)
     Sfx.death()
     ids.forEach((id) => { const e = registry.current.get(id); if (e) e.dying = true; registry.current.delete(id) })
@@ -984,42 +970,26 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     const now = state.clock.elapsedTime
 
     if (playing) {
-      /* --- Machine à états des vagues --- */
-      const phase = phaseRef.current
-      if (phase === 'intro') {
-        phaseTimer.current += dt
-        if (phaseTimer.current >= INTRO_DURATION) {
-          phaseRef.current = 'active'
-          spawnTimer.current = 0
-        }
-      } else if (phase === 'active') {
-        const wave = waveRef.current
-        const interval = Math.max(0.5, 1.6 - wave * 0.08)
-        if (spawnedRef.current < quotaRef.current) {
-          spawnTimer.current += dt
-          if (spawnTimer.current >= interval && countRef.current < MAX_ZOMBIES) {
-            spawnTimer.current = 0
-            spawnedRef.current += 1
-            const a = Math.random() * Math.PI * 2
-            const r = 14 + Math.random() * 5
-            const armoredChance = Math.min(0.2, 0.04 + wave * 0.015)
-            const armored = Math.random() < armoredChance
-            const gait = Math.random() < 0.5 ? 'limp' : 'unsteady'
-            const speedMul = 0.85 + Math.random() * 0.3
-            setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored, gait, speedMul }])
-          }
-        }
-        // vague terminée : tous apparus ET plus aucun en vie
-        if (spawnedRef.current >= quotaRef.current && countRef.current === 0) {
-          phaseRef.current = 'rest'
-          phaseTimer.current = 0
-          Sfx.waveCleared()
-        }
-      } else if (phase === 'rest') {
-        phaseTimer.current += dt
-        if (phaseTimer.current >= REST_DURATION) {
-          beginWave(waveRef.current + 1)
-        }
+      /* --- Vagues : arrivée continue rythmée par le temps --- */
+      waveTimer.current += dt
+      if (waveTimer.current >= WAVE_DURATION) {
+        waveTimer.current -= WAVE_DURATION
+        waveRef.current += 1
+        bannerUntil.current = now + BANNER_DURATION
+        Sfx.waveStart()
+      }
+      const wave = waveRef.current
+      const interval = Math.max(SPAWN_MIN, SPAWN_BASE - wave * SPAWN_STEP)
+      spawnTimer.current += dt
+      if (spawnTimer.current >= interval && countRef.current < MAX_ZOMBIES) {
+        spawnTimer.current = 0
+        const a = Math.random() * Math.PI * 2
+        const r = 14 + Math.random() * 5
+        const armoredChance = Math.min(0.22, 0.04 + wave * 0.015)
+        const armored = Math.random() < armoredChance
+        const gait = Math.random() < 0.5 ? 'limp' : 'unsteady'
+        const speedMul = 0.85 + Math.random() * 0.3 + Math.min(0.4, wave * 0.02)
+        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored, gait, speedMul }])
       }
 
       /* Faim + famine */
@@ -1093,18 +1063,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
 
       if (now - lastPush.current > 0.05) {
         lastPush.current = now
-        const ph = phaseRef.current
-        const wave = waveRef.current
-        let banner = null
-        let countdown = 0
-        if (ph === 'intro') banner = 'VAGUE ' + wave
-        else if (ph === 'rest') { banner = 'VAGUE ' + wave + ' SURVÉCUE'; countdown = Math.ceil(REST_DURATION - phaseTimer.current) }
-        const remaining = Math.max(0, quotaRef.current - killedRef.current)
+        const w = waveRef.current
+        const banner = now < bannerUntil.current ? 'VAGUE ' + w : null
+        const countdown = Math.max(0, Math.ceil(WAVE_DURATION - waveTimer.current))
         onSurvival({
           hunger: hungerRef.current,
           search: searchProgress.current,
           prompt: promptRef.current,
-          wave, phase: ph, banner, countdown, remaining,
+          wave: w, phase: 'active', banner, countdown, remaining: countRef.current,
         })
       }
     }
@@ -1215,7 +1181,9 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
         <div style={{ position: 'absolute', top: 18, left: '50%', transform: 'translateX(-50%)', textAlign: 'center' }}>
           <div style={{ fontSize: 13, letterSpacing: 4, fontWeight: 700, color: '#fbbf24' }}>VAGUE {wave}</div>
           {banner === null && (
-            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>{remaining} zombie{remaining > 1 ? 's' : ''} restant{remaining > 1 ? 's' : ''}</div>
+            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2 }}>
+              {remaining} zombie{remaining > 1 ? 's' : ''} · vague {wave + 1} dans {countdown}s
+            </div>
           )}
         </div>
       )}
@@ -1356,7 +1324,7 @@ export default function App() {
   const [weapon, setWeapon] = useState('sabre')
   const [ammo, setAmmo] = useState(START_AMMO)
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
-  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: 0, remaining: WAVE_BASE })
+  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0 })
   const [toast, setToast] = useState(null)
   const [muted, setMuted] = useState(false)
   const [gameKey, setGameKey] = useState(0)
@@ -1390,7 +1358,7 @@ export default function App() {
     setWeapon('sabre')
     setAmmo(START_AMMO)
     setHasPistol(START_HAS_PISTOL)
-    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: 0, remaining: WAVE_BASE })
+    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0 })
     setToast(null)
     setGameKey((k) => k + 1)
   }
