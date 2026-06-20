@@ -19,12 +19,20 @@
  */
 
 import React, {
-  useRef, useState, useEffect, useCallback, memo,
+  useRef, useState, useEffect, useCallback, useMemo, memo, Suspense,
   forwardRef, useImperativeHandle,
 } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Physics, RigidBody, CuboidCollider, CapsuleCollider } from '@react-three/rapier'
+import { useGLTF, useAnimations } from '@react-three/drei'
+import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import * as THREE from 'three'
+
+const ZOMBIE_URL = '/zombie_lite.glb'
+const ZOMBIE_MODEL_SCALE = 100      // Meshy a appliqué un facteur 0,01 -> on remet ~1,7
+const ZOMBIE_FEET_Y = -0.8          // pieds au sol (sous le centre de la capsule)
+const ZOMBIE_MODEL_FACING = 0       // passe à Math.PI si le zombie marche "à reculons"
+useGLTF.preload(ZOMBIE_URL, true)
 
 /* ---------------------------------------------------------------- */
 /* Réglages de gameplay                                              */
@@ -614,14 +622,71 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
 /* ---------------------------------------------------------------- */
 /* Zombie (normal ou blindé)                                         */
 /* ---------------------------------------------------------------- */
-function Zombie({ id, spawn, armored, posRef, registry, onDamage, playing }) {
+/* Modèle 3D animé du zombie (GLB Meshy) */
+function ZombieModel({ gait, speedMul, stateRef, entryRef }) {
+  const { scene, animations } = useGLTF(ZOMBIE_URL, true)
+  const cloned = useMemo(() => {
+    const c = cloneSkeleton(scene)
+    c.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true
+        o.frustumCulled = false        // évite la disparition du mesh skinné pendant l'anim
+        o.material = o.material.clone() // matière propre par instance (flash individuel)
+      }
+    })
+    return c
+  }, [scene])
+  const mats = useMemo(() => {
+    const arr = []
+    cloned.traverse((o) => { if (o.isMesh) arr.push(o.material) })
+    return arr
+  }, [cloned])
+
+  const group = useRef()
+  const { actions } = useAnimations(animations, group)
+  const current = useRef(null)
+
+  useEffect(() => {
+    const a = actions[gait]
+    if (a) { a.reset(); a.timeScale = speedMul; a.fadeIn(0.2).play() }
+    current.current = gait
+    if (actions.death) { actions.death.setLoop(THREE.LoopOnce, 1); actions.death.clampWhenFinished = true }
+    return () => { Object.values(actions).forEach((act) => act && act.stop()) }
+  }, [actions, gait, speedMul])
+
+  useFrame((state) => {
+    const desired = stateRef.current === 'death' ? 'death'
+      : stateRef.current === 'attack' ? 'grab'
+        : gait
+    if (desired !== current.current && actions[desired]) {
+      const next = actions[desired]
+      const prev = actions[current.current]
+      next.reset()
+      if (desired === 'death') { next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = true; next.fadeIn(0.12).play() }
+      else { next.timeScale = desired === 'grab' ? 1 : speedMul; next.fadeIn(0.15).play() }
+      if (prev && prev !== next) prev.fadeOut(0.15)
+      current.current = desired
+    }
+    const f = state.clock.elapsedTime - entryRef.current.hitFlash < 0.12
+    for (const m of mats) m.emissive.setRGB(f ? 0.5 : 0, 0, 0)
+  })
+
+  return (
+    <group ref={group} position={[0, ZOMBIE_FEET_Y, 0]} rotation={[0, ZOMBIE_MODEL_FACING, 0]} scale={ZOMBIE_MODEL_SCALE}>
+      <primitive object={cloned} />
+    </group>
+  )
+}
+
+function Zombie({ id, spawn, armored, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
   const body = useRef()
   const visual = useRef()
   const bodyMesh = useRef()
   const vestMesh = useRef()
+  const stateRef = useRef('walk')
   const entry = useRef({
     pos: new THREE.Vector3(spawn[0], 1, spawn[1]),
-    lastHit: -10, hp: ZOMBIE_HP, armored, hitFlash: -10, armorSpark: -10,
+    lastHit: -10, hp: ZOMBIE_HP, armored, hitFlash: -10, armorSpark: -10, dying: false,
   })
 
   useEffect(() => {
@@ -629,40 +694,55 @@ function Zombie({ id, spawn, armored, posRef, registry, onDamage, playing }) {
     return () => { registry.current.delete(id) }
   }, [id, registry])
 
+  // passage en mort : sort du registre (le combat l'ignore), puis suppression différée
+  useEffect(() => {
+    if (!dying) return
+    entry.current.dying = true
+    stateRef.current = 'death'
+    registry.current.delete(id)
+    const ms = armored ? 200 : 2300   // le bob (placeholder) part vite, le modèle joue sa mort
+    const tmr = setTimeout(() => onRemove(id), ms)
+    return () => clearTimeout(tmr)
+  }, [dying, armored, id, onRemove, registry])
+
   useFrame((state) => {
     if (!body.current) return
     const t = body.current.translation()
     entry.current.pos.set(t.x, t.y, t.z)
     const now = state.clock.elapsedTime
 
-    if (playing) {
+    if (dying || !playing) {
+      const vy = body.current.linvel().y
+      body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
+    } else {
       const dx = posRef.current.x - t.x
       const dz = posRef.current.z - t.z
       const d = Math.hypot(dx, dz)
       const vy = body.current.linvel().y
       if (d > 0.001) {
-        body.current.setLinvel({ x: (dx / d) * ZOMBIE_SPEED, y: vy, z: (dz / d) * ZOMBIE_SPEED }, true)
+        const sp = ZOMBIE_SPEED * speedMul
+        body.current.setLinvel({ x: (dx / d) * sp, y: vy, z: (dz / d) * sp }, true)
         if (visual.current) visual.current.rotation.y = Math.atan2(dx, dz)
       }
+      stateRef.current = d < CONTACT_RANGE ? 'attack' : 'walk'
       if (d < CONTACT_RANGE && now - entry.current.lastHit > HIT_COOLDOWN) {
         entry.current.lastHit = now
         onDamage(ZOMBIE_DAMAGE)
         Sfx.hurt()
       }
-    } else {
-      const vy = body.current.linvel().y
-      body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
     }
 
-    // feedback de dégâts (flash rouge) / ricochet (flash blanc sur le gilet)
-    if (bodyMesh.current) {
-      const f = now - entry.current.hitFlash < 0.12
-      bodyMesh.current.material.emissive.setRGB(f ? 0.9 : 0, 0, 0)
-    }
-    if (vestMesh.current) {
-      const s = now - entry.current.armorSpark < 0.12
-      const v = s ? 0.9 : 0
-      vestMesh.current.material.emissive.setRGB(v, v, v)
+    // flash du placeholder blindé (le modèle GLB gère le sien)
+    if (armored) {
+      if (bodyMesh.current) {
+        const f = now - entry.current.hitFlash < 0.12
+        bodyMesh.current.material.emissive.setRGB(f ? 0.9 : 0, 0, 0)
+      }
+      if (vestMesh.current) {
+        const s = now - entry.current.armorSpark < 0.12
+        const v = s ? 0.9 : 0
+        vestMesh.current.material.emissive.setRGB(v, v, v)
+      }
     }
   })
 
@@ -680,42 +760,26 @@ function Zombie({ id, spawn, armored, posRef, registry, onDamage, playing }) {
       <group ref={visual}>
         {armored ? (
           <>
-            {/* ex-policier */}
+            {/* ex-policier (placeholder en attendant son GLB) */}
             <mesh ref={bodyMesh} castShadow>
               <capsuleGeometry args={[0.42, 0.85, 8, 16]} />
               <meshStandardMaterial color="#27384d" />
             </mesh>
-            {/* gilet pare-balles */}
             <mesh ref={vestMesh} position={[0, 0.05, 0]} castShadow>
               <boxGeometry args={[0.82, 0.62, 0.52]} />
               <meshStandardMaterial color="#0f0f12" />
             </mesh>
-            {/* tête */}
             <mesh position={[0, 0.88, 0.08]} castShadow>
               <sphereGeometry args={[0.26, 12, 12]} />
               <meshStandardMaterial color="#8a96a3" />
             </mesh>
-            {/* casquette */}
             <mesh position={[0, 1.04, 0.02]} castShadow>
               <boxGeometry args={[0.5, 0.12, 0.5]} />
               <meshStandardMaterial color="#10131a" />
             </mesh>
           </>
         ) : (
-          <>
-            <mesh ref={bodyMesh} castShadow>
-              <capsuleGeometry args={[0.4, 0.8, 8, 16]} />
-              <meshStandardMaterial color="#5b7d3a" />
-            </mesh>
-            <mesh position={[0, 0.8, 0.1]} castShadow>
-              <sphereGeometry args={[0.26, 12, 12]} />
-              <meshStandardMaterial color="#7d9b54" />
-            </mesh>
-            <mesh position={[0, 0.15, 0.45]} rotation={[1.2, 0, 0]} castShadow>
-              <boxGeometry args={[0.55, 0.16, 0.16]} />
-              <meshStandardMaterial color="#46602e" />
-            </mesh>
-          </>
+          <ZombieModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
         )}
       </group>
     </RigidBody>
@@ -760,7 +824,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const groanTimer = useRef(0)
   const nextGroan = useRef(3)
 
-  useEffect(() => { countRef.current = zombies.length }, [zombies])
+  useEffect(() => { countRef.current = zombies.filter((z) => !z.dying).length }, [zombies])
   useEffect(() => { if (playing) Sfx.waveStart() }, [])
 
   const beginWave = (n) => {
@@ -773,12 +837,18 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     Sfx.waveStart()
   }
 
+  // coup fatal : on marque "mourant" (le corps joue sa mort), score compté tout de suite
   const killZombies = useCallback((ids) => {
     killedRef.current += ids.length
-    setZombies((zs) => zs.filter((z) => !ids.includes(z.id)))
     onKill(ids.length)
     Sfx.death()
+    ids.forEach((id) => { const e = registry.current.get(id); if (e) e.dying = true; registry.current.delete(id) })
+    setZombies((zs) => zs.map((z) => (ids.includes(z.id) ? { ...z, dying: true } : z)))
   }, [onKill])
+
+  const removeZombie = useCallback((id) => {
+    setZombies((zs) => zs.filter((z) => z.id !== id))
+  }, [])
 
   const grantLoot = useCallback(() => {
     let type
@@ -830,7 +900,9 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
             const r = 14 + Math.random() * 5
             const armoredChance = Math.min(0.2, 0.04 + wave * 0.015)
             const armored = Math.random() < armoredChance
-            setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored }])
+            const gait = Math.random() < 0.5 ? 'limp' : 'unsteady'
+            const speedMul = 0.85 + Math.random() * 0.3
+            setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored, gait, speedMul }])
           }
         }
         // vague terminée : tous apparus ET plus aucun en vie
@@ -981,9 +1053,13 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           id={z.id}
           spawn={z.spawn}
           armored={z.armored}
+          gait={z.gait}
+          speedMul={z.speedMul}
+          dying={z.dying}
           posRef={playerPos}
           registry={registry}
           onDamage={onDamage}
+          onRemove={removeZombie}
           playing={playing}
         />
       ))}
@@ -1223,18 +1299,20 @@ export default function App() {
         <color attach="background" args={['#0d0d12']} />
         <fog attach="fog" args={['#0d0d12', 22, 58]} />
         <Physics gravity={[0, -20, 0]}>
-          <Game
-            key={gameKey}
-            playing={gameState === 'playing'}
-            onDamage={handleDamage}
-            onHeal={handleHeal}
-            onKill={handleKill}
-            onWeapon={handleWeapon}
-            onAmmo={handleAmmo}
-            onPistol={handlePistol}
-            onSurvival={handleSurvival}
-            onPickup={handlePickup}
-          />
+          <Suspense fallback={null}>
+            <Game
+              key={gameKey}
+              playing={gameState === 'playing'}
+              onDamage={handleDamage}
+              onHeal={handleHeal}
+              onKill={handleKill}
+              onWeapon={handleWeapon}
+              onAmmo={handleAmmo}
+              onPistol={handlePistol}
+              onSurvival={handleSurvival}
+              onPickup={handlePickup}
+            />
+          </Suspense>
         </Physics>
       </Canvas>
       <HUD
