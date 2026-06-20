@@ -79,11 +79,10 @@ const BULLET_POOL = 40
 const CONTACT_RANGE = 1.25
 const HIT_COOLDOWN = 0.8
 const ZOMBIE_DAMAGE = 10
-const MAX_ZOMBIES = 14
 const ARENA = 24
 
 /* Vagues — arrivée continue, rythmée par le temps (la pression ne retombe jamais) */
-const WAVE_DURATION = 22         // durée d'une vague avant de passer à la suivante (s)
+const WAVE_DURATION = 30         // durée d'une vague avant de passer à la suivante (s)
 const BANNER_DURATION = 2.2      // durée d'affichage de l'annonce "VAGUE N"
 const SPAWN_BASE = 1.5           // intervalle de spawn de base (s)
 const SPAWN_STEP = 0.07          // l'intervalle se réduit à chaque vague
@@ -981,7 +980,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       const wave = waveRef.current
       const interval = Math.max(SPAWN_MIN, SPAWN_BASE - wave * SPAWN_STEP)
       spawnTimer.current += dt
-      if (spawnTimer.current >= interval && countRef.current < MAX_ZOMBIES) {
+      if (spawnTimer.current >= interval) {
         spawnTimer.current = 0
         const a = Math.random() * Math.PI * 2
         const r = 14 + Math.random() * 5
@@ -1367,7 +1366,7 @@ export default function App() {
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#0a0a0d', cursor: gameState === 'playing' ? 'crosshair' : 'default' }}>
-      <Canvas shadows camera={{ position: [0, 14, 11], fov: 50 }}>
+      <Canvas shadows camera={{ position: [0, 14, 11], fov: 39 }}>
         <color attach="background" args={['#0d0d12']} />
         <fog attach="fog" args={['#0d0d12', 22, 58]} />
         <Physics gravity={[0, -20, 0]}>
