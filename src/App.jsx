@@ -140,6 +140,84 @@ function losBlocked(rects, x1, z1, x2, z2) {
 }
 
 /* ---------------------------------------------------------------- */
+/* Sons procéduraux (Web Audio, aucun fichier externe)               */
+/* ---------------------------------------------------------------- */
+const Sfx = (() => {
+  let ctx = null
+  let master = null
+  let muted = false
+  let lastHurt = 0
+  const BASE = 0.3
+
+  function ensure() {
+    try {
+      if (!ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext
+        if (!AC) return null
+        ctx = new AC()
+        master = ctx.createGain()
+        master.gain.value = muted ? 0 : BASE
+        master.connect(ctx.destination)
+      }
+      if (ctx.state === 'suspended') ctx.resume()
+    } catch (e) { /* audio indisponible */ }
+    return ctx
+  }
+
+  function blip({ type = 'sine', f0, f1, dur = 0.15, gain = 0.5, attack = 0.005 }) {
+    if (!ctx || muted) return
+    const t = ctx.currentTime
+    const osc = ctx.createOscillator()
+    const g = ctx.createGain()
+    osc.type = type
+    osc.frequency.setValueAtTime(f0, t)
+    if (f1 !== undefined) osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur)
+    g.gain.setValueAtTime(0.0001, t)
+    g.gain.linearRampToValueAtTime(gain, t + attack)
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+    osc.connect(g); g.connect(master)
+    osc.start(t); osc.stop(t + dur + 0.02)
+  }
+
+  function noise({ dur = 0.15, gain = 0.5, type = 'lowpass', f = 1000, q = 1, sweepTo }) {
+    if (!ctx || muted) return
+    const t = ctx.currentTime
+    const n = Math.floor(ctx.sampleRate * dur)
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate)
+    const data = buf.getChannelData(0)
+    for (let i = 0; i < n; i++) data[i] = Math.random() * 2 - 1
+    const src = ctx.createBufferSource(); src.buffer = buf
+    const filt = ctx.createBiquadFilter(); filt.type = type; filt.frequency.setValueAtTime(f, t); filt.Q.value = q
+    if (sweepTo !== undefined) filt.frequency.exponentialRampToValueAtTime(Math.max(1, sweepTo), t + dur)
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(gain, t)
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur)
+    src.connect(filt); filt.connect(g); g.connect(master)
+    src.start(t); src.stop(t + dur)
+  }
+
+  return {
+    ensure,
+    setMuted(m) { muted = m; if (master) master.gain.value = m ? 0 : BASE },
+    shoot() { ensure(); noise({ dur: 0.12, gain: 0.6, type: 'lowpass', f: 1800, sweepTo: 300 }); blip({ type: 'square', f0: 150, f1: 50, dur: 0.1, gain: 0.22 }) },
+    sabre() { ensure(); noise({ dur: 0.18, gain: 0.3, type: 'bandpass', f: 2400, q: 1.2, sweepTo: 600 }) },
+    death() { ensure(); blip({ type: 'sawtooth', f0: 200, f1: 50, dur: 0.22, gain: 0.28 }); noise({ dur: 0.14, gain: 0.2, type: 'lowpass', f: 800 }) },
+    hurt() { ensure(); const now = ctx ? ctx.currentTime : 0; if (now - lastHurt < 0.15) return; lastHurt = now; blip({ type: 'square', f0: 220, f1: 110, dur: 0.18, gain: 0.3 }) },
+    ricochet() { ensure(); blip({ type: 'triangle', f0: 3000, f1: 1200, dur: 0.12, gain: 0.22 }); noise({ dur: 0.05, gain: 0.18, type: 'highpass', f: 3000 }) },
+    groan() { ensure(); blip({ type: 'sawtooth', f0: 85 + Math.random() * 35, f1: 55, dur: 0.5, gain: 0.16 }) },
+    pickup(kind) {
+      ensure()
+      if (kind === 'pistol') { blip({ type: 'square', f0: 400, f1: 800, dur: 0.12, gain: 0.28 }); setTimeout(() => blip({ type: 'square', f0: 800, f1: 1200, dur: 0.12, gain: 0.28 }), 90) }
+      else if (kind === 'ammo') { blip({ type: 'square', f0: 600, f1: 900, dur: 0.1, gain: 0.24 }) }
+      else { blip({ type: 'sine', f0: 500, f1: 760, dur: 0.16, gain: 0.28 }) }
+    },
+    waveStart() { ensure(); blip({ type: 'sawtooth', f0: 150, f1: 320, dur: 0.5, gain: 0.3 }) },
+    waveCleared() { ensure(); blip({ type: 'sine', f0: 520, f1: 780, dur: 0.18, gain: 0.3 }); setTimeout(() => blip({ type: 'sine', f0: 780, f1: 1040, dur: 0.22, gain: 0.3 }), 140) },
+    gameOver() { ensure(); blip({ type: 'sawtooth', f0: 300, f1: 55, dur: 0.85, gain: 0.32 }) },
+  }
+})()
+
+/* ---------------------------------------------------------------- */
 /* Hook clavier                                                      */
 /* ---------------------------------------------------------------- */
 function useKeyboard() {
@@ -302,6 +380,7 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsR
             if (e) {
               if (e.armored) {
                 e.armorSpark = now            // ricochet sur le gilet, aucun dégât
+                Sfx.ricochet()
               } else {
                 e.hp -= BULLET_DAMAGE
                 e.hitFlash = now
@@ -446,6 +525,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
       if (weapon === 'sabre') {
         lastUse.current = now
         swingStart.current = now
+        Sfx.sabre()
         const cosHalf = Math.cos(SABRE_HALF_ANGLE)
         const kills = []
         registry.current.forEach((z, id) => {
@@ -466,6 +546,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
         lastUse.current = now
         lastShot.current = now
         bulletsRef.current?.fire(t.x + fx * 0.7, t.z + fz * 0.7, fx, fz)
+        Sfx.shoot()
         ammoRef.current -= 1
         onAmmo(ammoRef.current)
       }
@@ -566,6 +647,7 @@ function Zombie({ id, spawn, armored, posRef, registry, onDamage, playing }) {
       if (d < CONTACT_RANGE && now - entry.current.lastHit > HIT_COOLDOWN) {
         entry.current.lastHit = now
         onDamage(ZOMBIE_DAMAGE)
+        Sfx.hurt()
       }
     } else {
       const vy = body.current.linvel().y
@@ -675,8 +757,11 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const prevX = useRef(0)
   const prevZ = useRef(0)
   const lastPush = useRef(0)
+  const groanTimer = useRef(0)
+  const nextGroan = useRef(3)
 
   useEffect(() => { countRef.current = zombies.length }, [zombies])
+  useEffect(() => { if (playing) Sfx.waveStart() }, [])
 
   const beginWave = (n) => {
     waveRef.current = n
@@ -685,12 +770,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     killedRef.current = 0
     phaseRef.current = 'intro'
     phaseTimer.current = 0
+    Sfx.waveStart()
   }
 
   const killZombies = useCallback((ids) => {
     killedRef.current += ids.length
     setZombies((zs) => zs.filter((z) => !ids.includes(z.id)))
     onKill(ids.length)
+    Sfx.death()
   }, [onKill])
 
   const grantLoot = useCallback(() => {
@@ -701,6 +788,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     } else {
       type = Math.random() < 0.6 ? 'food' : 'ammo'
     }
+    Sfx.pickup(type)
     if (type === 'pistol') {
       hasPistolRef.current = true
       ammoRef.current += PISTOL_AMMO_BONUS
@@ -749,6 +837,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         if (spawnedRef.current >= quotaRef.current && countRef.current === 0) {
           phaseRef.current = 'rest'
           phaseTimer.current = 0
+          Sfx.waveCleared()
         }
       } else if (phase === 'rest') {
         phaseTimer.current += dt
@@ -764,6 +853,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         if (starveTimer.current >= STARVE_TICK) { starveTimer.current = 0; onDamage(STARVE_DAMAGE) }
       } else {
         starveTimer.current = 0
+      }
+
+      /* Grognements d'ambiance */
+      groanTimer.current += dt
+      if (groanTimer.current >= nextGroan.current && countRef.current > 0) {
+        groanTimer.current = 0
+        nextGroan.current = 2.5 + Math.random() * 3.5
+        Sfx.groan()
       }
 
       /* Vitesse joueur (annule la fouille s'il bouge) */
@@ -923,7 +1020,7 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, toast, wave, banner, countdown, remaining, playing }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, toast, wave, banner, countdown, remaining, playing, muted, onToggleMute }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
       <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
@@ -986,6 +1083,12 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
       <div style={{ position: 'absolute', bottom: 16, left: 0, right: 0, textAlign: 'center', fontSize: 13, opacity: 0.55 }}>
         ZQSD bouger · souris viser · clic/Espace attaquer · 1 / 2 changer d'arme · E fouiller
       </div>
+
+      <button onClick={onToggleMute} title={muted ? 'Activer le son' : 'Couper le son'} style={{
+        position: 'absolute', bottom: 16, right: 20, pointerEvents: 'auto',
+        width: 40, height: 40, borderRadius: 20, border: '1px solid #ffffff22',
+        background: '#00000055', color: '#fff', fontSize: 18, cursor: 'pointer',
+      }}>{muted ? '🔇' : '🔊'}</button>
     </div>
   )
 }
@@ -1075,6 +1178,7 @@ export default function App() {
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
   const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: 0, remaining: WAVE_BASE })
   const [toast, setToast] = useState(null)
+  const [muted, setMuted] = useState(false)
   const [gameKey, setGameKey] = useState(0)
   const toastTimer = useRef(null)
 
@@ -1096,6 +1200,9 @@ export default function App() {
     if (toastTimer.current) clearTimeout(toastTimer.current)
     toastTimer.current = setTimeout(() => setToast(null), 1600)
   }, [])
+  const toggleMute = () => setMuted((m) => { const nm = !m; Sfx.setMuted(nm); return nm })
+
+  useEffect(() => { if (gameState === 'gameover') Sfx.gameOver() }, [gameState])
 
   const resetState = () => {
     setHealth(100)
@@ -1107,7 +1214,7 @@ export default function App() {
     setToast(null)
     setGameKey((k) => k + 1)
   }
-  const startGame = () => { resetState(); setGameState('playing') }
+  const startGame = () => { Sfx.ensure(); resetState(); setGameState('playing') }
   const gotoMenu = () => { resetState(); setGameState('menu') }
 
   return (
@@ -1145,6 +1252,8 @@ export default function App() {
         countdown={survival.countdown}
         remaining={survival.remaining}
         playing={gameState === 'playing'}
+        muted={muted}
+        onToggleMute={toggleMute}
       />
       {gameState === 'menu' && <StartScreen onPlay={startGame} />}
       {gameState === 'gameover' && <GameOver score={score} onRestart={startGame} onMenu={gotoMenu} />}
