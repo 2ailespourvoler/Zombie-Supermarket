@@ -29,7 +29,7 @@ import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.j
 import * as THREE from 'three'
 
 const ZOMBIE_URL = '/zombie_lite.glb'
-const ZOMBIE_MODEL_SCALE = 100      // Meshy a appliqué un facteur 0,01 -> on remet ~1,7
+const ZOMBIE_MODEL_SCALE = 1.0       // le squelette fait déjà ~1,67 m -> pas de mise à l'échelle
 const ZOMBIE_FEET_Y = -0.8          // pieds au sol (sous le centre de la capsule)
 const ZOMBIE_MODEL_FACING = 0       // passe à Math.PI si le zombie marche "à reculons"
 useGLTF.preload(ZOMBIE_URL, true)
