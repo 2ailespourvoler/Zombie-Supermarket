@@ -48,7 +48,7 @@ useGLTF.preload(PISTOL_URL, true)
 const WEAPON_HOLDER_SCALE = 100
 const SABRE_SCALE = 0.342           // dim native 1,9 -> ~0,65 m
 const SABRE_POS = [0, 0, 0]         // à régler : position dans la main (mètres)
-const SABRE_ROT = [0.205, 0.118, -0.716] // lame dans l'axe du bras au repos (calculé par PCA)
+const SABRE_ROT = [-1.350, -0.634, -0.779] // lame perpendiculaire au bras, pointée vers l'avant (calculé par PCA)
 const PISTOL_SCALE = 0.182          // -> ~0,35 m (agrandi de 50 %)
 const PISTOL_POS = [0, 0, 0]
 const PISTOL_ROT = [0, 0, 0]
