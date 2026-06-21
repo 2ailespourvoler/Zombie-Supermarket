@@ -302,13 +302,32 @@ function Lights() {
 }
 
 function Arena() {
+  const tileTex = useMemo(() => {
+    const TILE_M = 0.65                 // côté du carreau (mètres)
+    const px = 256
+    const c = document.createElement('canvas'); c.width = c.height = px
+    const g = c.getContext('2d')
+    g.fillStyle = '#ffffff'; g.fillRect(0, 0, px, px)        // carreau blanc
+    const lw = Math.max(2, Math.round(px * 0.022))           // joint ~2 %
+    g.fillStyle = '#d2d2d8'                                   // gris clair
+    g.fillRect(0, 0, px, lw)                                  // joint haut
+    g.fillRect(0, 0, lw, px)                                  // joint gauche
+    const tex = new THREE.CanvasTexture(c)
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+    const rep = 80 / TILE_M                                   // 80 unités de sol / 0,65 m
+    tex.repeat.set(rep, rep)
+    tex.anisotropy = 8
+    if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace
+    return tex
+  }, [])
+
   return (
     <>
       <RigidBody type="fixed" colliders={false}>
         <CuboidCollider args={[40, 0.5, 40]} position={[0, -0.5, 0]} />
         <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
           <planeGeometry args={[80, 80]} />
-          <meshStandardMaterial color="#3a3a42" />
+          <meshStandardMaterial map={tileTex} roughness={0.85} metalness={0} />
         </mesh>
       </RigidBody>
 
@@ -589,6 +608,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
   const spaceHeld = useRef(false)
   const locomotionRef = useRef('idle')
   const attackRef = useRef({ id: 0, name: 'slash' })
+  const gpSwitchPrev = useRef(false)
 
   const triggerAttack = (name) => { attackRef.current = { id: attackRef.current.id + 1, name } }
 
@@ -639,34 +659,63 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
       return
     }
 
+    // manette : premier pad connecté
+    const pads = navigator.getGamepads ? navigator.getGamepads() : []
+    let gp = null
+    for (let i = 0; i < pads.length; i++) { if (pads[i]) { gp = pads[i]; break } }
+    const DZ = 0.22
+
+    // visée — souris par défaut
     raycaster.setFromCamera(state.pointer, camera)
     if (raycaster.ray.intersectPlane(groundPlane, aim.current)) {
       const dx = aim.current.x - t.x
       const dz = aim.current.z - t.z
       if (dx * dx + dz * dz > 0.04) yaw.current = Math.atan2(dx, dz)
     }
+    // visée — stick droit prioritaire si poussé
+    if (gp) {
+      const rx = gp.axes[2] || 0, rz = gp.axes[3] || 0
+      if (Math.hypot(rx, rz) > DZ) yaw.current = Math.atan2(rx, rz)
+    }
     if (visual.current) visual.current.rotation.y = yaw.current
 
+    // déplacement — clavier (numérique) ou stick gauche (analogique)
     const k = keys.current
     let mx = 0, mz = 0
     if (k['KeyW'] || k['KeyZ'] || k['ArrowUp']) mz -= 1
     if (k['KeyS'] || k['ArrowDown']) mz += 1
     if (k['KeyA'] || k['KeyQ'] || k['ArrowLeft']) mx -= 1
     if (k['KeyD'] || k['ArrowRight']) mx += 1
-    const len = Math.hypot(mx, mz)
+    if (gp) {
+      const lx = gp.axes[0] || 0, lz = gp.axes[1] || 0
+      if (Math.hypot(lx, lz) > DZ) { mx = lx; mz = lz }
+    }
+    let mag = Math.hypot(mx, mz)
+    if (mag > 1) { mx /= mag; mz /= mag; mag = 1 }
     const vy = body.current.linvel().y
     let speed = PLAYER_SPEED
     if (hungerRef.current < LOW_HUNGER) speed *= SLOW_FACTOR
-    if (len > 0) {
-      body.current.setLinvel({ x: (mx / len) * speed, y: vy, z: (mz / len) * speed }, true)
+    if (mag > 0.001) {
+      body.current.setLinvel({ x: mx * speed, y: vy, z: mz * speed }, true)
     } else {
       body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
     }
-    locomotionRef.current = len > 0 ? 'run' : 'idle'
+    locomotionRef.current = mag > 0.1 ? 'run' : 'idle'
+
+    // changement d'arme à la manette (RB ou Y), sur front montant
+    if (gp) {
+      const sw = !!(gp.buttons[5]?.pressed || gp.buttons[3]?.pressed)
+      if (sw && !gpSwitchPrev.current) {
+        const next = weaponRef.current === 'sabre' ? 'pistol' : 'sabre'
+        if (!(next === 'pistol' && !hasPistolRef.current)) { weaponRef.current = next; onWeapon(next) }
+      }
+      gpSwitchPrev.current = sw
+    }
 
     const now = state.clock.elapsedTime
     const weapon = weaponRef.current
-    const firing = mouseHeld.current || spaceHeld.current
+    const gpFire = !!(gp && ((gp.buttons[7]?.value || 0) > 0.3 || gp.buttons[0]?.pressed))
+    const firing = mouseHeld.current || spaceHeld.current || gpFire
     const cd = weapon === 'sabre' ? SABRE_COOLDOWN : PISTOL_COOLDOWN
 
     if (firing && now - lastUse.current > cd) {
@@ -1047,7 +1096,12 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       }
       promptRef.current = target !== -1
 
-      if (target !== -1 && keys.current['KeyE'] && moveSpeed < 1.0) {
+      const padSearch = (() => {
+        const ps = navigator.getGamepads ? navigator.getGamepads() : []
+        for (let i = 0; i < ps.length; i++) { if (ps[i]) return !!ps[i].buttons[2]?.pressed }
+        return false
+      })()
+      if (target !== -1 && (keys.current['KeyE'] || padSearch) && moveSpeed < 1.0) {
         searchProgress.current += dt / SEARCH_TIME
         if (searchProgress.current >= 1) {
           grantLoot()
@@ -1228,7 +1282,7 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
       ) : null}
 
       <div style={{ position: 'absolute', bottom: 16, left: 0, right: 0, textAlign: 'center', fontSize: 13, opacity: 0.55 }}>
-        ZQSD bouger · souris viser · clic/Espace attaquer · 1 / 2 changer d'arme · E fouiller
+        ZQSD / stick bouger · souris / stick droit viser · clic / Espace / RT attaquer · 1 / 2 / RB changer d'arme · E / X fouiller
       </div>
 
       <button onClick={onToggleMute} title={muted ? 'Activer le son' : 'Couper le son'} style={{
@@ -1271,11 +1325,11 @@ function StartScreen({ onPlay }) {
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, justifyContent: 'center', maxWidth: 720 }}>
         <Panel title="COMMANDES">
-          Déplacement — ZQSD<br />
-          Viser — Souris<br />
-          Attaquer — Clic / Espace<br />
-          Changer d'arme — 1 / 2<br />
-          Fouiller — E (maintenir)
+          Déplacement — ZQSD / stick gauche<br />
+          Viser — Souris / stick droit<br />
+          Attaquer — Clic / Espace / RT<br />
+          Changer d'arme — 1 / 2 / RB<br />
+          Fouiller — E / X (maintenir)
         </Panel>
         <Panel title="SURVIE">
           Sabre — 2 coups, illimité<br />
