@@ -47,7 +47,7 @@ useGLTF.preload(PISTOL_URL, true)
 // Armes attachées à l'os RightHand (échelle monde 0,01) -> holder ×100 = repère en mètres.
 const WEAPON_HOLDER_SCALE = 100
 const SABRE_SCALE = 0.342           // dim native 1,9 -> ~0,65 m
-const SABRE_POS = [0, 0, 0]         // à régler : position dans la main (mètres)
+const SABRE_POS = [-0.008, 0.086, -0.343] // main sur la poignée (décalage calculé)
 const SABRE_ROT = [-1.350, -0.634, -0.779] // lame perpendiculaire au bras, pointée vers l'avant (calculé par PCA)
 const PISTOL_SCALE = 0.182          // -> ~0,35 m (agrandi de 50 %)
 const PISTOL_POS = [0, 0, 0]
@@ -113,12 +113,10 @@ const SEARCH_TIME = 1.2
 const SHELF_COOLDOWN = 18
 
 const SHELVES = [
-  { x: -9, z: -7, w: 7, d: 1.6 },
-  { x: 9, z: -7, w: 7, d: 1.6 },
-  { x: -9, z: 7, w: 7, d: 1.6 },
-  { x: 9, z: 7, w: 7, d: 1.6 },
-  { x: 0, z: -13, w: 1.6, d: 7 },
-  { x: 0, z: 13, w: 1.6, d: 7 },
+  { x: 0, z: -9, w: 12, d: 1.4 },
+  { x: 0, z: -3, w: 12, d: 1.4 },
+  { x: 0, z: 3, w: 12, d: 1.4 },
+  { x: 0, z: 9, w: 12, d: 1.4 },
 ]
 
 const WALLS = [
@@ -347,6 +345,63 @@ function Arena() {
 /* ---------------------------------------------------------------- */
 /* Rayons poussables (kinematic, déplacés par <Game>)               */
 /* ---------------------------------------------------------------- */
+const GONDOLA_URL = '/gondola_lite.glb'
+const GONDOLA_W = 1.91     // largeur native (X)
+const GONDOLA_H = 1.13     // hauteur native (Y)
+const GONDOLA_D = 0.72     // profondeur native (Z)
+const GONDOLA_BASE = 0.57  // distance origine -> base (pour poser au sol)
+const GONDOLA_FACE = 0     // oriente la face "étagères" vers l'extérieur (0 ou Math.PI si inversé)
+useGLTF.preload(GONDOLA_URL, true)
+
+/* Pave un rayon (w×d) de travées de gondole, dos à dos (double face) */
+function GondolaModel({ w, d }) {
+  const { scene } = useGLTF(GONDOLA_URL, true)
+  const layout = useMemo(() => {
+    const runLen = Math.max(w, d)
+    const depth = Math.min(w, d)
+    const runRotY = w >= d ? 0 : Math.PI / 2
+    const count = Math.max(1, Math.round(runLen / GONDOLA_W))
+    const bayW = runLen / count
+    const scale = bayW / GONDOLA_W
+    const depthOff = Math.max(0, depth / 2 - (GONDOLA_D * scale) / 2)
+    const localY = GONDOLA_BASE * scale - 0.6   // pose la base au sol (RigidBody à y=0,6)
+    const instances = []
+    for (let j = 0; j < count; j++) {
+      const off = -runLen / 2 + bayW * (j + 0.5)
+      instances.push({ off, side: 1 })
+      instances.push({ off, side: -1 })
+    }
+    return { runRotY, scale, depthOff, localY, instances }
+  }, [w, d])
+
+  const clones = useMemo(() => layout.instances.map(() => {
+    const c = scene.clone(true)
+    c.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true; o.receiveShadow = true
+        o.material = o.material.clone()
+        o.material.metalness = 0          // évite le rendu noir (Meshy exporte metallic=1)
+      }
+    })
+    return c
+  }), [scene, layout])
+
+  return (
+    <group rotation={[0, layout.runRotY, 0]} position={[0, layout.localY, 0]}>
+      {layout.instances.map((inst, k) => (
+        <group
+          key={k}
+          position={[inst.off, 0, inst.side * layout.depthOff]}
+          rotation={[0, inst.side > 0 ? GONDOLA_FACE : GONDOLA_FACE + Math.PI, 0]}
+          scale={layout.scale}
+        >
+          <primitive object={clones[k]} />
+        </group>
+      ))}
+    </group>
+  )
+}
+
 function Shelves({ bodiesRef }) {
   return (
     <group>
@@ -359,10 +414,7 @@ function Shelves({ bodiesRef }) {
           position={[s.x, 0.6, s.z]}
         >
           <CuboidCollider args={[s.w / 2, 0.6, s.d / 2]} />
-          <mesh castShadow receiveShadow>
-            <boxGeometry args={[s.w, 1.2, s.d]} />
-            <meshStandardMaterial color="#6b7280" />
-          </mesh>
+          <GondolaModel w={s.w} d={s.d} />
         </RigidBody>
       ))}
     </group>
