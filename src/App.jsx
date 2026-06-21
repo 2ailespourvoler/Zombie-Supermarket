@@ -477,7 +477,7 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
 
   const cloned = useMemo(() => {
     const c = cloneSkeleton(scene)
-    c.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false } })
+    c.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; o.material = o.material.clone(); o.material.metalness = 0; o.material.roughness = 1 } })
     return c
   }, [scene])
   const handBone = useMemo(() => {
@@ -665,20 +665,6 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
     for (let i = 0; i < pads.length; i++) { if (pads[i]) { gp = pads[i]; break } }
     const DZ = 0.22
 
-    // visée — souris par défaut
-    raycaster.setFromCamera(state.pointer, camera)
-    if (raycaster.ray.intersectPlane(groundPlane, aim.current)) {
-      const dx = aim.current.x - t.x
-      const dz = aim.current.z - t.z
-      if (dx * dx + dz * dz > 0.04) yaw.current = Math.atan2(dx, dz)
-    }
-    // visée — stick droit prioritaire si poussé
-    if (gp) {
-      const rx = gp.axes[2] || 0, rz = gp.axes[3] || 0
-      if (Math.hypot(rx, rz) > DZ) yaw.current = Math.atan2(rx, rz)
-    }
-    if (visual.current) visual.current.rotation.y = yaw.current
-
     // déplacement — clavier (numérique) ou stick gauche (analogique)
     const k = keys.current
     let mx = 0, mz = 0
@@ -692,6 +678,25 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
     }
     let mag = Math.hypot(mx, mz)
     if (mag > 1) { mx /= mag; mz /= mag; mag = 1 }
+
+    // orientation — face au déplacement si on bouge, sinon visée (souris / stick droit) à l'arrêt
+    if (mag > 0.1) {
+      yaw.current = Math.atan2(mx, mz)
+    } else {
+      raycaster.setFromCamera(state.pointer, camera)
+      if (raycaster.ray.intersectPlane(groundPlane, aim.current)) {
+        const dx = aim.current.x - t.x
+        const dz = aim.current.z - t.z
+        if (dx * dx + dz * dz > 0.04) yaw.current = Math.atan2(dx, dz)
+      }
+      if (gp) {
+        const rx = gp.axes[2] || 0, rz = gp.axes[3] || 0
+        if (Math.hypot(rx, rz) > DZ) yaw.current = Math.atan2(rx, rz)
+      }
+    }
+    if (visual.current) visual.current.rotation.y = yaw.current
+
+    // vitesse
     const vy = body.current.linvel().y
     let speed = PLAYER_SPEED
     if (hungerRef.current < LOW_HUNGER) speed *= SLOW_FACTOR
@@ -784,6 +789,8 @@ function ZombieModel({ gait, speedMul, stateRef, entryRef }) {
         o.castShadow = true
         o.frustumCulled = false        // évite la disparition du mesh skinné pendant l'anim
         o.material = o.material.clone() // matière propre par instance (flash individuel)
+        o.material.metalness = 0        // Meshy exporte metallic=1 -> rendu noir sans HDR
+        o.material.roughness = 1
       }
     })
     return c
@@ -1420,7 +1427,7 @@ export default function App() {
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#0a0a0d', cursor: gameState === 'playing' ? 'crosshair' : 'default' }}>
-      <Canvas shadows camera={{ position: [0, 14, 11], fov: 39 }}>
+      <Canvas shadows camera={{ position: [0, 14, 11], fov: 34 }}>
         <color attach="background" args={['#0d0d12']} />
         <fog attach="fog" args={['#0d0d12', 22, 58]} />
         <Physics gravity={[0, -20, 0]}>
