@@ -34,6 +34,12 @@ const ZOMBIE_FEET_Y = -0.8          // pieds au sol (sous le centre de la capsul
 const ZOMBIE_MODEL_FACING = 0       // passe à Math.PI si le zombie marche "à reculons"
 useGLTF.preload(ZOMBIE_URL, true)
 
+const BOB_URL = '/bob_lite.glb'
+const BOB_MODEL_SCALE = 1.0         // même rig que le zombie
+const BOB_FEET_Y = -0.8
+const BOB_MODEL_FACING = 0          // passe à Math.PI si Bob marche "à reculons"
+useGLTF.preload(BOB_URL, true)
+
 const PLAYER_URL = '/player_lite.glb'
 const PLAYER_MODEL_SCALE = 1.0      // squelette ~1,67 m
 const PLAYER_FEET_Y = -0.8
@@ -50,9 +56,9 @@ const SABRE_SCALE = 0.342           // dim native 1,9 -> ~0,65 m
 const SABRE_POS = [-0.008, 0.086, -0.343] // main sur la poignée (décalage calculé)
 const SABRE_ROT = [-1.350, -0.634, -0.779] // lame perpendiculaire au bras, pointée vers l'avant (calculé par PCA)
 const PISTOL_SCALE = 0.182          // -> ~0,35 m (agrandi de 50 %)
-const PISTOL_POS = [0, 0, 0]
-const PISTOL_ROT = [0, 0, 0]
-const MUZZLE_POS = [0, 0, 0.2]      // bout du canon (pour le flash)
+const PISTOL_POS = [-0.008, 0.129, 0.016]   // manche dans la main (calculé)
+const PISTOL_ROT = [-1.813, 1.503, -2.368]  // canon vers le sol, le long du bras (calculé)
+const MUZZLE_POS = [-0.019, 0.299, 0.042]   // bout du canon (pour le flash, calculé)
 
 /* ---------------------------------------------------------------- */
 /* Réglages de gameplay                                              */
@@ -889,11 +895,71 @@ function ZombieModel({ gait, speedMul, stateRef, entryRef }) {
   )
 }
 
+/* Modèle 3D animé de "Bob" (ex-policier blindé) */
+function BobModel({ gait, speedMul, stateRef, entryRef }) {
+  const { scene, animations } = useGLTF(BOB_URL, true)
+  const cloned = useMemo(() => {
+    const c = cloneSkeleton(scene)
+    c.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true
+        o.frustumCulled = false
+        o.material = o.material.clone()
+        o.material.metalness = 0
+        o.material.roughness = 1
+      }
+    })
+    return c
+  }, [scene])
+  const mats = useMemo(() => {
+    const arr = []
+    cloned.traverse((o) => { if (o.isMesh) arr.push(o.material) })
+    return arr
+  }, [cloned])
+
+  const group = useRef()
+  const { actions } = useAnimations(animations, group)
+  const current = useRef(null)
+
+  useEffect(() => {
+    const a = actions[gait]
+    if (a) { a.reset(); a.timeScale = speedMul; a.fadeIn(0.2).play() }
+    current.current = gait
+    if (actions.death) { actions.death.setLoop(THREE.LoopOnce, 1); actions.death.clampWhenFinished = true }
+    return () => { Object.values(actions).forEach((act) => act && act.stop()) }
+  }, [actions, gait, speedMul])
+
+  useFrame((state) => {
+    const desired = stateRef.current === 'death' ? 'death'
+      : stateRef.current === 'attack' ? 'grab'
+        : gait
+    if (desired !== current.current && actions[desired]) {
+      const next = actions[desired]
+      const prev = actions[current.current]
+      next.reset()
+      if (desired === 'death') { next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = true; next.fadeIn(0.12).play() }
+      else { next.timeScale = desired === 'grab' ? 1 : speedMul; next.fadeIn(0.15).play() }
+      if (prev && prev !== next) prev.fadeOut(0.15)
+      current.current = desired
+    }
+    const f = state.clock.elapsedTime - entryRef.current.hitFlash < 0.12   // touché sabre -> rouge
+    const s = state.clock.elapsedTime - entryRef.current.armorSpark < 0.12 // ricochet balle -> blanc
+    for (const m of mats) {
+      if (s) m.emissive.setRGB(0.8, 0.8, 0.8)
+      else m.emissive.setRGB(f ? 0.5 : 0, 0, 0)
+    }
+  })
+
+  return (
+    <group ref={group} position={[0, BOB_FEET_Y, 0]} rotation={[0, BOB_MODEL_FACING, 0]} scale={BOB_MODEL_SCALE}>
+      <primitive object={cloned} />
+    </group>
+  )
+}
+
 function Zombie({ id, spawn, armored, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
   const body = useRef()
   const visual = useRef()
-  const bodyMesh = useRef()
-  const vestMesh = useRef()
   const stateRef = useRef('walk')
   const entry = useRef({
     pos: new THREE.Vector3(spawn[0], 1, spawn[1]),
@@ -911,7 +977,7 @@ function Zombie({ id, spawn, armored, gait, speedMul, dying, posRef, registry, o
     entry.current.dying = true
     stateRef.current = 'death'
     registry.current.delete(id)
-    const ms = armored ? 200 : 2300   // le bob (placeholder) part vite, le modèle joue sa mort
+    const ms = 2300   // laisse le corps jouer sa mort avant suppression
     const tmr = setTimeout(() => onRemove(id), ms)
     return () => clearTimeout(tmr)
   }, [dying, armored, id, onRemove, registry])
@@ -942,19 +1008,6 @@ function Zombie({ id, spawn, armored, gait, speedMul, dying, posRef, registry, o
         Sfx.hurt()
       }
     }
-
-    // flash du placeholder blindé (le modèle GLB gère le sien)
-    if (armored) {
-      if (bodyMesh.current) {
-        const f = now - entry.current.hitFlash < 0.12
-        bodyMesh.current.material.emissive.setRGB(f ? 0.9 : 0, 0, 0)
-      }
-      if (vestMesh.current) {
-        const s = now - entry.current.armorSpark < 0.12
-        const v = s ? 0.9 : 0
-        vestMesh.current.material.emissive.setRGB(v, v, v)
-      }
-    }
   })
 
   return (
@@ -970,25 +1023,7 @@ function Zombie({ id, spawn, armored, gait, speedMul, dying, posRef, registry, o
       <CapsuleCollider args={[0.4, 0.4]} />
       <group ref={visual}>
         {armored ? (
-          <>
-            {/* ex-policier (placeholder en attendant son GLB) */}
-            <mesh ref={bodyMesh} castShadow>
-              <capsuleGeometry args={[0.42, 0.85, 8, 16]} />
-              <meshStandardMaterial color="#27384d" />
-            </mesh>
-            <mesh ref={vestMesh} position={[0, 0.05, 0]} castShadow>
-              <boxGeometry args={[0.82, 0.62, 0.52]} />
-              <meshStandardMaterial color="#0f0f12" />
-            </mesh>
-            <mesh position={[0, 0.88, 0.08]} castShadow>
-              <sphereGeometry args={[0.26, 12, 12]} />
-              <meshStandardMaterial color="#8a96a3" />
-            </mesh>
-            <mesh position={[0, 1.04, 0.02]} castShadow>
-              <boxGeometry args={[0.5, 0.12, 0.5]} />
-              <meshStandardMaterial color="#10131a" />
-            </mesh>
-          </>
+          <BobModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
         ) : (
           <ZombieModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
         )}
