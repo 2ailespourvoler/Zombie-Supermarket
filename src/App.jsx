@@ -40,6 +40,12 @@ const BOB_FEET_Y = -0.8
 const BOB_MODEL_FACING = 0          // passe à Math.PI si Bob marche "à reculons"
 useGLTF.preload(BOB_URL, true)
 
+const FEMALE_URL = '/female_lite.glb'
+const FEMALE_MODEL_SCALE = 1.0      // même rig
+const FEMALE_FEET_Y = -0.8
+const FEMALE_MODEL_FACING = 0       // passe à Math.PI si elle marche "à reculons"
+useGLTF.preload(FEMALE_URL, true)
+
 const PLAYER_URL = '/player_lite.glb'
 const PLAYER_MODEL_SCALE = 1.0      // squelette ~1,67 m
 const PLAYER_FEET_Y = -0.8
@@ -946,7 +952,65 @@ function BobModel({ gait, speedMul, stateRef, entryRef }) {
   )
 }
 
-function Zombie({ id, spawn, armored, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
+/* Modèle 3D animé du zombie femme */
+function FemaleModel({ gait, speedMul, stateRef, entryRef }) {
+  const { scene, animations } = useGLTF(FEMALE_URL, true)
+  const cloned = useMemo(() => {
+    const c = cloneSkeleton(scene)
+    c.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true
+        o.frustumCulled = false
+        o.material = o.material.clone()
+        o.material.metalness = 0
+        o.material.roughness = 1
+      }
+    })
+    return c
+  }, [scene])
+  const mats = useMemo(() => {
+    const arr = []
+    cloned.traverse((o) => { if (o.isMesh) arr.push(o.material) })
+    return arr
+  }, [cloned])
+
+  const group = useRef()
+  const { actions } = useAnimations(animations, group)
+  const current = useRef(null)
+
+  useEffect(() => {
+    const a = actions[gait]
+    if (a) { a.reset(); a.timeScale = speedMul; a.fadeIn(0.2).play() }
+    current.current = gait
+    if (actions.death) { actions.death.setLoop(THREE.LoopOnce, 1); actions.death.clampWhenFinished = true }
+    return () => { Object.values(actions).forEach((act) => act && act.stop()) }
+  }, [actions, gait, speedMul])
+
+  useFrame((state) => {
+    const desired = stateRef.current === 'death' ? 'death'
+      : stateRef.current === 'attack' ? 'grab'
+        : gait
+    if (desired !== current.current && actions[desired]) {
+      const next = actions[desired]
+      const prev = actions[current.current]
+      next.reset()
+      if (desired === 'death') { next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = true; next.fadeIn(0.12).play() }
+      else { next.timeScale = desired === 'grab' ? 1 : speedMul; next.fadeIn(0.15).play() }
+      if (prev && prev !== next) prev.fadeOut(0.15)
+      current.current = desired
+    }
+    const f = state.clock.elapsedTime - entryRef.current.hitFlash < 0.12
+    for (const m of mats) m.emissive.setRGB(f ? 0.5 : 0, 0, 0)
+  })
+
+  return (
+    <group ref={group} position={[0, FEMALE_FEET_Y, 0]} rotation={[0, FEMALE_MODEL_FACING, 0]} scale={FEMALE_MODEL_SCALE}>
+      <primitive object={cloned} />
+    </group>
+  )
+}
+
+function Zombie({ id, spawn, armored, female, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
   const body = useRef()
   const visual = useRef()
   const stateRef = useRef('walk')
@@ -1013,6 +1077,8 @@ function Zombie({ id, spawn, armored, gait, speedMul, dying, posRef, registry, o
       <group ref={visual}>
         {armored ? (
           <BobModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
+        ) : female ? (
+          <FemaleModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
         ) : (
           <ZombieModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
         )}
@@ -1118,9 +1184,10 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         const r = 14 + Math.random() * 5
         const armoredChance = Math.min(0.22, 0.04 + wave * 0.015)
         const armored = Math.random() < armoredChance
+        const female = !armored && Math.random() < 0.5
         const gait = Math.random() < 0.5 ? 'limp' : 'unsteady'
         const speedMul = 0.85 + Math.random() * 0.3 + Math.min(0.4, wave * 0.02)
-        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored, gait, speedMul }])
+        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored, female, gait, speedMul }])
       }
 
       /* Faim + famine */
@@ -1259,6 +1326,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           id={z.id}
           spawn={z.spawn}
           armored={z.armored}
+          female={z.female}
           gait={z.gait}
           speedMul={z.speedMul}
           dying={z.dying}
