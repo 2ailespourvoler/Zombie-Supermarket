@@ -56,9 +56,9 @@ const SABRE_SCALE = 0.342           // dim native 1,9 -> ~0,65 m
 const SABRE_POS = [-0.008, 0.086, -0.343] // main sur la poignée (décalage calculé)
 const SABRE_ROT = [-1.350, -0.634, -0.779] // lame perpendiculaire au bras, pointée vers l'avant (calculé par PCA)
 const PISTOL_SCALE = 0.182          // -> ~0,35 m (agrandi de 50 %)
-const PISTOL_POS = [-0.008, 0.129, 0.016]   // manche dans la main (calculé)
-const PISTOL_ROT = [-1.813, 1.503, -2.368]  // canon vers le sol, le long du bras (calculé)
-const MUZZLE_POS = [-0.019, 0.299, 0.042]   // bout du canon (pour le flash, calculé)
+const PISTOL_POS = [-0.006, 0.092, 0.003]   // manche dans la main (calculé)
+const PISTOL_ROT = [1.572, -1.509, 0.043]   // canon vers le sol, le long du bras (calculé)
+const MUZZLE_POS = [-0.015, 0.249, 0.056]   // bout du canon (pour le flash, calculé)
 
 /* ---------------------------------------------------------------- */
 /* Réglages de gameplay                                              */
@@ -119,10 +119,10 @@ const SEARCH_TIME = 1.2
 const SHELF_COOLDOWN = 18
 
 const SHELVES = [
-  { x: 0, z: -9, w: 12, d: 1.4 },
-  { x: 0, z: -3, w: 12, d: 1.4 },
-  { x: 0, z: 3, w: 12, d: 1.4 },
-  { x: 0, z: 9, w: 12, d: 1.4 },
+  { x: 0, z: -9, w: 10, d: 1.4 },
+  { x: 0, z: -3, w: 10, d: 1.4 },
+  { x: 0, z: 3, w: 10, d: 1.4 },
+  { x: 0, z: 9, w: 10, d: 1.4 },
 ]
 
 const WALLS = [
@@ -352,41 +352,35 @@ function Arena() {
 /* Rayons poussables (kinematic, déplacés par <Game>)               */
 /* ---------------------------------------------------------------- */
 const GONDOLA_URL = '/gondola_lite.glb'
-const GONDOLA_W = 1.91     // largeur native (X)
-const GONDOLA_H = 1.13     // hauteur native (Y)
-const GONDOLA_D = 0.72     // profondeur native (Z)
-const GONDOLA_BASE = 0.57  // distance origine -> base (pour poser au sol)
-const GONDOLA_FACE = 0     // oriente la face "étagères" vers l'extérieur (0 ou Math.PI si inversé)
+const GONDOLA_W = 1.38     // largeur native (X, axe de pavage)
+const GONDOLA_H = 1.90     // hauteur native (Y)
+const GONDOLA_D = 1.43     // profondeur native (Z) — déjà double face
+const GONDOLA_BASE = 0.95  // distance origine -> base (pour poser au sol)
+const GONDOLA_FACE = 0     // oriente la façade (0 ou Math.PI si inversé)
 useGLTF.preload(GONDOLA_URL, true)
 
-/* Pave un rayon (w×d) de travées de gondole, dos à dos (double face) */
+/* Pave un rayon (w×d) de travées de gondole (rangée simple, modèle déjà double face) */
 function GondolaModel({ w, d }) {
   const { scene } = useGLTF(GONDOLA_URL, true)
   const layout = useMemo(() => {
     const runLen = Math.max(w, d)
-    const depth = Math.min(w, d)
     const runRotY = w >= d ? 0 : Math.PI / 2
     const count = Math.max(1, Math.round(runLen / GONDOLA_W))
     const bayW = runLen / count
     const scale = bayW / GONDOLA_W
-    const depthOff = Math.max(0, depth / 2 - (GONDOLA_D * scale) / 2)
     const localY = GONDOLA_BASE * scale - 0.6   // pose la base au sol (RigidBody à y=0,6)
-    const instances = []
-    for (let j = 0; j < count; j++) {
-      const off = -runLen / 2 + bayW * (j + 0.5)
-      instances.push({ off, side: 1 })
-      instances.push({ off, side: -1 })
-    }
-    return { runRotY, scale, depthOff, localY, instances }
+    const offs = []
+    for (let j = 0; j < count; j++) offs.push(-runLen / 2 + bayW * (j + 0.5))
+    return { runRotY, scale, localY, offs }
   }, [w, d])
 
-  const clones = useMemo(() => layout.instances.map(() => {
+  const clones = useMemo(() => layout.offs.map(() => {
     const c = scene.clone(true)
     c.traverse((o) => {
       if (o.isMesh) {
         o.castShadow = true; o.receiveShadow = true
         o.material = o.material.clone()
-        o.material.metalness = 0          // évite le rendu noir (Meshy exporte metallic=1)
+        o.material.metalness = 0
       }
     })
     return c
@@ -394,13 +388,8 @@ function GondolaModel({ w, d }) {
 
   return (
     <group rotation={[0, layout.runRotY, 0]} position={[0, layout.localY, 0]}>
-      {layout.instances.map((inst, k) => (
-        <group
-          key={k}
-          position={[inst.off, 0, inst.side * layout.depthOff]}
-          rotation={[0, inst.side > 0 ? GONDOLA_FACE : GONDOLA_FACE + Math.PI, 0]}
-          scale={layout.scale}
-        >
+      {layout.offs.map((off, k) => (
+        <group key={k} position={[off, 0, 0]} rotation={[0, GONDOLA_FACE, 0]} scale={layout.scale}>
           <primitive object={clones[k]} />
         </group>
       ))}
