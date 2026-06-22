@@ -62,9 +62,9 @@ const SABRE_SCALE = 0.342           // dim native 1,9 -> ~0,65 m
 const SABRE_POS = [-0.008, 0.086, -0.343] // main sur la poignée (décalage calculé)
 const SABRE_ROT = [-1.350, -0.634, -0.779] // lame perpendiculaire au bras, pointée vers l'avant (calculé par PCA)
 const PISTOL_SCALE = 0.182          // -> ~0,35 m (agrandi de 50 %)
-const PISTOL_POS = [-0.006, 0.082, 0.041]   // manche dans la main (calculé)
+const PISTOL_POS = [-0.010, 0.152, 0.012]   // manche dans la main (calculé, ancré haut de poignée)
 const PISTOL_ROT = [-1.543, 1.502, 0.505]   // canon vers le sol, au-dessus de la main (calculé)
-const MUZZLE_POS = [-0.017, 0.246, 0.068]   // bout du canon (pour le flash, calculé)
+const MUZZLE_POS = [-0.022, 0.316, 0.039]   // bout du canon (pour le flash, calculé)
 
 /* ---------------------------------------------------------------- */
 /* Réglages de gameplay                                              */
@@ -1571,7 +1571,7 @@ export default function App() {
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#0a0a0d', cursor: gameState === 'playing' ? 'crosshair' : 'default' }}>
-      <Canvas shadows camera={{ position: [0, 14, 11], fov: 34 }}>
+      <Canvas shadows camera={{ position: [0, 14, 11], fov: 30 }}>
         <color attach="background" args={['#0d0d12']} />
         <fog attach="fog" args={['#0d0d12', 22, 58]} />
         <Physics gravity={[0, -20, 0]}>
