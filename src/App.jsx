@@ -124,18 +124,25 @@ const SEARCH_RANGE = 2.7
 const SEARCH_TIME = 1.2
 const SHELF_COOLDOWN = 18
 
-const SHELVES = [
-  { x: 0, z: -9, w: 10, d: 1.4 },
-  { x: 0, z: -3, w: 10, d: 1.4 },
-  { x: 0, z: 3, w: 10, d: 1.4 },
-  { x: 0, z: 9, w: 10, d: 1.4 },
-]
+/* Galerie marchande : couloir central, devantures de chaque côté */
+const CORRIDOR_HW = 6            // demi-largeur du couloir jouable (x ∈ [-6, 6])
+const CORRIDOR_HL = 22           // demi-longueur (z ∈ [-22, 22])
+const WALL_H = 3.4               // hauteur des murs / devantures
+const SHOP_TYPES = ['pharmacie', 'armurerie', 'epicerie', 'boulangerie']
+const STORE_SLOTS = [-18, -12, -6, 0, 6, 12, 18]   // centres z des devantures
+const STORE_W = 5.4              // largeur d'une devanture (le long de z)
+const DOOR_W = 1.8               // largeur de la porte vitrée
+const SIGN_W = 3.8               // largeur de l'enseigne (ratio 4:1 -> hauteur SIGN_W/4)
+const STOREFRONTS = []
+for (const side of [-1, 1]) for (const z of STORE_SLOTS) {
+  STOREFRONTS.push({ x: side * CORRIDOR_HW, z, side, type: SHOP_TYPES[Math.floor(Math.random() * SHOP_TYPES.length)] })
+}
 
 const WALLS = [
-  { x: 0, z: -ARENA, w: ARENA * 2 + 2, d: 1 },
-  { x: 0, z: ARENA, w: ARENA * 2 + 2, d: 1 },
-  { x: -ARENA, z: 0, w: 1, d: ARENA * 2 + 2 },
-  { x: ARENA, z: 0, w: 1, d: ARENA * 2 + 2 },
+  { x: 0, z: -CORRIDOR_HL, w: CORRIDOR_HW * 2 + 2, d: 1 },   // fond
+  { x: 0, z: CORRIDOR_HL, w: CORRIDOR_HW * 2 + 2, d: 1 },    // entrée
+  { x: -CORRIDOR_HW, z: 0, w: 1, d: CORRIDOR_HL * 2 + 2 },   // mur gauche
+  { x: CORRIDOR_HW, z: 0, w: 1, d: CORRIDOR_HL * 2 + 2 },    // mur droit
 ]
 
 const raycaster = new THREE.Raycaster()
@@ -403,21 +410,70 @@ function GondolaModel({ w, d }) {
   )
 }
 
-function Shelves({ bodiesRef }) {
+/* Enseigne : charge /signs/<type>.png, avec un visuel provisoire en attendant */
+const SHOP_COLORS = { pharmacie: '#16a34a', armurerie: '#7f1d1d', epicerie: '#b45309', boulangerie: '#a16207' }
+function makeSignPlaceholder(type) {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 256
+  const g = c.getContext('2d')
+  g.fillStyle = SHOP_COLORS[type] || '#334155'; g.fillRect(0, 0, 1024, 256)
+  g.strokeStyle = 'rgba(255,255,255,0.85)'; g.lineWidth = 10; g.strokeRect(20, 20, 984, 216)
+  g.fillStyle = '#ffffff'; g.font = 'bold 110px Georgia, serif'; g.textAlign = 'center'; g.textBaseline = 'middle'
+  g.fillText(type.toUpperCase(), 512, 138)
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8
+  return t
+}
+function ShopSign({ type, width }) {
+  const placeholder = useMemo(() => makeSignPlaceholder(type), [type])
+  const [map, setMap] = useState(placeholder)
+  useEffect(() => {
+    let alive = true
+    new THREE.TextureLoader().load(
+      `/signs/${type}.png`,
+      (t) => { if (alive) { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; setMap(t) } },
+      undefined,
+      () => {},   // 404 -> on garde le provisoire
+    )
+    return () => { alive = false }
+  }, [type])
+  return (
+    <mesh>
+      <planeGeometry args={[width, width / 4]} />
+      <meshBasicMaterial map={map} toneMapped={false} />
+    </mesh>
+  )
+}
+
+/* Devantures de magasins le long des deux murs du couloir */
+function Storefronts() {
   return (
     <group>
-      {SHELVES.map((s, i) => (
-        <RigidBody
-          key={i}
-          ref={(el) => (bodiesRef.current[i] = el)}
-          type="kinematicPosition"
-          colliders={false}
-          position={[s.x, 0.6, s.z]}
-        >
-          <CuboidCollider args={[s.w / 2, 0.6, s.d / 2]} />
-          <GondolaModel w={s.w} d={s.d} />
-        </RigidBody>
-      ))}
+      {STOREFRONTS.map((s, i) => {
+        const faceX = s.x - s.side * 0.55          // face intérieure (vers le couloir)
+        const ry = s.side > 0 ? -Math.PI / 2 : Math.PI / 2  // tourne la devanture vers le couloir
+        return (
+          <group key={i} position={[faceX, 0, s.z]} rotation={[0, ry, 0]}>
+            {/* panneau de façade (vitrine) */}
+            <mesh position={[0, WALL_H / 2, 0]}>
+              <boxGeometry args={[STORE_W, WALL_H, 0.1]} />
+              <meshStandardMaterial color="#1b2430" metalness={0} roughness={0.9} />
+            </mesh>
+            {/* porte vitrée */}
+            <mesh position={[0, 1.1, 0.08]}>
+              <boxGeometry args={[DOOR_W, 2.2, 0.06]} />
+              <meshStandardMaterial color="#9fd8e6" transparent opacity={0.35} metalness={0.1} roughness={0.1} />
+            </mesh>
+            {/* cadre de porte */}
+            <mesh position={[0, 2.25, 0.09]}>
+              <boxGeometry args={[DOOR_W + 0.2, 0.12, 0.08]} />
+              <meshStandardMaterial color="#0f172a" />
+            </mesh>
+            {/* enseigne lumineuse au-dessus de la porte (inclinée vers la caméra) */}
+            <group position={[0, 2.8, 0.12]} rotation={[-0.4, 0, 0]}>
+              <ShopSign type={s.type} width={SIGN_W} />
+            </group>
+          </group>
+        )
+      })}
     </group>
   )
 }
@@ -425,8 +481,8 @@ function Shelves({ bodiesRef }) {
 function LootIndicators({ indicatorsRef }) {
   return (
     <group>
-      {SHELVES.map((s, i) => (
-        <mesh key={i} ref={(el) => (indicatorsRef.current[i] = el)} position={[s.x, 1.7, s.z]}>
+      {STOREFRONTS.map((s, i) => (
+        <mesh key={i} ref={(el) => (indicatorsRef.current[i] = el)} position={[s.x - s.side * 1.1, 1.5, s.z]}>
           <octahedronGeometry args={[0.28, 0]} />
           <meshStandardMaterial color="#fbbf24" emissive="#f59e0b" emissiveIntensity={1.4} />
         </mesh>
@@ -1096,7 +1152,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const bulletsRef = useRef()
   const indicatorsRef = useRef([])
   const shelfBodies = useRef([])
-  const shelfRects = useRef(SHELVES.map((s) => ({ x: s.x, z: s.z, w: s.w, d: s.d })))
+  const shelfRects = useRef([])   // couloir ouvert : pas d'obstacle central (LOS/balles)
   const keys = useKeyboard()
 
   const [zombies, setZombies] = useState([])
@@ -1112,7 +1168,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const hungerRef = useRef(HUNGER_MAX)
   const ammoRef = useRef(START_AMMO)
   const hasPistolRef = useRef(START_HAS_PISTOL)
-  const shelfStates = useRef(SHELVES.map(() => ({ available: true, cooldownUntil: 0 })))
+  const shelfStates = useRef(STOREFRONTS.map(() => ({ available: true, cooldownUntil: 0 })))
   const searchProgress = useRef(0)
   const promptRef = useRef(false)
   const starveTimer = useRef(0)
@@ -1137,29 +1193,34 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     setZombies((zs) => zs.filter((z) => z.id !== id))
   }, [])
 
-  const grantLoot = useCallback(() => {
-    let type
-    if (!hasPistolRef.current) {
-      const r = Math.random()
-      type = r < 0.45 ? 'pistol' : (r < 0.72 ? 'food' : 'ammo')
-    } else {
-      type = Math.random() < 0.6 ? 'food' : 'ammo'
-    }
-    Sfx.pickup(type)
-    if (type === 'pistol') {
-      hasPistolRef.current = true
-      ammoRef.current += PISTOL_AMMO_BONUS
-      onPistol(true)
-      onAmmo(ammoRef.current)
-      onPickup('🔫 Pistolet trouvé ! +' + PISTOL_AMMO_BONUS + ' munitions')
-    } else if (type === 'ammo') {
-      ammoRef.current += AMMO_PICKUP
-      onAmmo(ammoRef.current)
-      onPickup('Munitions +' + AMMO_PICKUP)
-    } else {
+  const grantLoot = useCallback((shop) => {
+    if (shop === 'armurerie') {
+      if (!hasPistolRef.current) {
+        hasPistolRef.current = true
+        ammoRef.current += PISTOL_AMMO_BONUS + AMMO_PICKUP
+        onPistol(true)
+        onAmmo(ammoRef.current)
+        Sfx.pickup('pistol')
+        onPickup('🔫 Armurerie : pistolet + munitions !')
+      } else {
+        ammoRef.current += AMMO_PICKUP + 6
+        onAmmo(ammoRef.current)
+        Sfx.pickup('ammo')
+        onPickup('🔫 Armurerie : munitions +' + (AMMO_PICKUP + 6))
+      }
+    } else if (shop === 'pharmacie') {
+      onHeal(45)
+      Sfx.pickup('food')
+      onPickup('💊 Pharmacie : +45 santé')
+    } else if (shop === 'epicerie') {
       hungerRef.current = Math.min(HUNGER_MAX, hungerRef.current + FOOD_HUNGER)
       onHeal(FOOD_HEAL)
-      onPickup('🍖 Nourriture (+faim, +santé)')
+      Sfx.pickup('food')
+      onPickup('🛒 Épicerie : +faim, +santé')
+    } else { // boulangerie
+      hungerRef.current = Math.min(HUNGER_MAX, hungerRef.current + 28)
+      Sfx.pickup('food')
+      onPickup('🥖 Boulangerie : +faim')
     }
   }, [onPistol, onAmmo, onHeal, onPickup])
 
@@ -1180,14 +1241,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       spawnTimer.current += dt
       if (spawnTimer.current >= interval) {
         spawnTimer.current = 0
-        const a = Math.random() * Math.PI * 2
-        const r = 14 + Math.random() * 5
         const armoredChance = Math.min(0.22, 0.04 + wave * 0.015)
         const armored = Math.random() < armoredChance
         const female = !armored && Math.random() < 0.5
         const gait = Math.random() < 0.5 ? 'limp' : 'unsteady'
         const speedMul = 0.85 + Math.random() * 0.3 + Math.min(0.4, wave * 0.02)
-        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [Math.cos(a) * r, Math.sin(a) * r], armored, female, gait, speedMul }])
+        const endZ = (Math.random() < 0.5 ? -1 : 1) * (CORRIDOR_HL - 1.5)
+        const sx = (Math.random() * 2 - 1) * (CORRIDOR_HW - 1.2)
+        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [sx, endZ], armored, female, gait, speedMul }])
       }
 
       /* Faim + famine */
@@ -1213,35 +1274,19 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       prevX.current = px
       prevZ.current = pz
 
-      /* Rayons poussables : on déplace les positions vivantes */
-      for (let i = 0; i < shelfRects.current.length; i++) {
-        const rect = shelfRects.current[i]
-        let count = 0, ax = 0, az = 0
-        registry.current.forEach((z) => {
-          const d = distToRect(z.pos.x, z.pos.z, rect.x, rect.z, rect.w / 2, rect.d / 2)
-          if (d < PUSH_RANGE) { count++; ax += z.pos.x; az += z.pos.z }
-        })
-        if (count >= PUSH_THRESHOLD) {
-          ax /= count; az /= count
-          let dx = rect.x - ax, dz = rect.z - az
-          const L = Math.hypot(dx, dz) || 1
-          rect.x = THREE.MathUtils.clamp(rect.x + (dx / L) * PUSH_SPEED * dt, -ARENA + 2, ARENA - 2)
-          rect.z = THREE.MathUtils.clamp(rect.z + (dz / L) * PUSH_SPEED * dt, -ARENA + 2, ARENA - 2)
-        }
-      }
-
-      /* Réapprovisionnement des rayons */
+      /* Réapprovisionnement des devantures */
       for (let i = 0; i < shelfStates.current.length; i++) {
         const st = shelfStates.current[i]
         if (!st.available && now >= st.cooldownUntil) st.available = true
       }
 
-      /* Fouille du rayon le plus proche */
+      /* Fouille de la devanture la plus proche (porte) */
       let target = -1, best = Infinity
-      for (let i = 0; i < shelfRects.current.length; i++) {
+      for (let i = 0; i < STOREFRONTS.length; i++) {
         if (!shelfStates.current[i].available) continue
-        const s = shelfRects.current[i]
-        const d = distToRect(px, pz, s.x, s.z, s.w / 2, s.d / 2)
+        const s = STOREFRONTS[i]
+        const doorX = s.x - s.side * 0.6
+        const d = distToRect(px, pz, doorX, s.z, 0.9, 0.4)
         if (d < SEARCH_RANGE && d < best) { best = d; target = i }
       }
       promptRef.current = target !== -1
@@ -1254,7 +1299,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       if (target !== -1 && (keys.current['KeyE'] || padSearch) && moveSpeed < 1.0) {
         searchProgress.current += dt / SEARCH_TIME
         if (searchProgress.current >= 1) {
-          grantLoot()
+          grantLoot(STOREFRONTS[target].type)
           const st = shelfStates.current[target]
           st.available = false
           st.cooldownUntil = now + SHELF_COOLDOWN
@@ -1278,22 +1323,15 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       }
     }
 
-    /* Synchronise les corps kinematic des rayons (toujours) */
-    for (let i = 0; i < shelfBodies.current.length; i++) {
-      const b = shelfBodies.current[i]
-      const rect = shelfRects.current[i]
-      if (b && rect) b.setNextKinematicTranslation({ x: rect.x, y: 0.6, z: rect.z })
-    }
-
-    /* Indicateurs de butin (suivent les rayons) */
+    /* Indicateurs de butin (devant les portes disponibles) */
     for (let i = 0; i < indicatorsRef.current.length; i++) {
       const ind = indicatorsRef.current[i]
-      const rect = shelfRects.current[i]
-      if (!ind || !rect) continue
+      const s = STOREFRONTS[i]
+      if (!ind || !s) continue
       const avail = shelfStates.current[i].available
       ind.visible = avail
       if (avail) {
-        ind.position.set(rect.x, 1.7 + Math.sin(now * 3 + i) * 0.12, rect.z)
+        ind.position.set(s.x - s.side * 1.1, 1.5 + Math.sin(now * 3 + i) * 0.12, s.z)
         ind.rotation.y = now * 1.5
       }
     }
@@ -1304,7 +1342,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       <FollowCamera target={playerPos} />
       <Lights />
       <Arena />
-      <Shelves bodiesRef={shelfBodies} />
+      <Storefronts />
       <LootIndicators indicatorsRef={indicatorsRef} />
       <Bullets ref={bulletsRef} registry={registry} killZombies={killZombies} shelfRectsRef={shelfRects} playing={playing} />
       <Player
@@ -1428,7 +1466,7 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
         </div>
       ) : prompt ? (
         <div style={{ position: 'absolute', bottom: 110, left: '50%', transform: 'translateX(-50%)', fontSize: 14, opacity: 0.85 }}>
-          Maintenir <b>E</b> pour fouiller le rayon
+          Maintenir <b>E</b> / <b>X</b> pour fouiller le magasin
         </div>
       ) : null}
 
@@ -1470,7 +1508,7 @@ function StartScreen({ onPlay }) {
         <div style={{ width: 90, height: 3, background: '#ef4444', margin: '18px auto' }} />
         <p style={{ margin: 0, fontSize: 17, opacity: 0.8, lineHeight: 1.5 }}>
           Survivez aux vagues de morts-vivants dans un supermarché abandonné.<br />
-          Fouillez les rayons pour vous armer et vous nourrir. Ne mourez pas de faim.
+          Fouillez les magasins (armurerie, pharmacie, épicerie, boulangerie) pour vous armer et vous nourrir. Ne mourez pas de faim.
         </p>
       </div>
 
