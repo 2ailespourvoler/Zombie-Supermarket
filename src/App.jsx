@@ -54,8 +54,10 @@ useGLTF.preload(PLAYER_URL, true)
 
 const SABRE_URL = '/sabre_lite.glb'
 const PISTOL_URL = '/pistol_lite.glb'
+const UZI_URL = '/uzi_lite.glb'
 useGLTF.preload(SABRE_URL, true)
 useGLTF.preload(PISTOL_URL, true)
+useGLTF.preload(UZI_URL, true)
 // Armes attachées à l'os RightHand (échelle monde 0,01) -> holder ×100 = repère en mètres.
 const WEAPON_HOLDER_SCALE = 100
 const SABRE_SCALE = 0.342           // dim native 1,9 -> ~0,65 m
@@ -65,6 +67,10 @@ const PISTOL_SCALE = 0.182          // -> ~0,35 m (agrandi de 50 %)
 const PISTOL_POS = [-0.010, 0.152, 0.012]   // manche dans la main (calculé, ancré haut de poignée)
 const PISTOL_ROT = [-1.543, 1.502, 0.505]   // canon vers le sol, au-dessus de la main (calculé)
 const MUZZLE_POS = [-0.022, 0.316, 0.039]   // bout du canon (pour le flash, calculé)
+const UZI_SCALE = 0.26              // -> ~0,5 m
+const UZI_POS = [-0.008, 0.128, 0.142]      // manche dans la main (calculé)
+const UZI_ROT = [-1.760, 1.507, 0.656]      // canon vers le sol, au-dessus de la main (calculé)
+const UZI_MUZZLE_POS = [-0.022, 0.359, 0.142]
 
 /* ---------------------------------------------------------------- */
 /* Réglages de gameplay                                              */
@@ -83,6 +89,9 @@ const SABRE_COOLDOWN = 0.45
 const SABRE_SWING_DURATION = 0.3
 
 const PISTOL_COOLDOWN = 0.22
+const UZI_COOLDOWN = 0.07           // tir rapide en rafale
+const UZI_BULLET_SPREAD = 0.07      // légère dispersion (rad)
+const UZI_AMMO_BONUS = 150          // munitions fournies avec l'Uzi
 const BULLET_SPEED = 40
 const BULLET_LIFE = 1.1
 const BULLET_HIT_RADIUS = 0.6
@@ -319,6 +328,8 @@ function Lights() {
 }
 
 function Arena() {
+  const FLOOR_W = CORRIDOR_HW * 2 + 4    // sol limité au couloir (vide sombre autour)
+  const FLOOR_L = CORRIDOR_HL * 2 + 4
   const tileTex = useMemo(() => {
     const TILE_M = 0.65                 // côté du carreau (mètres)
     const px = 256
@@ -331,29 +342,28 @@ function Arena() {
     g.fillRect(0, 0, lw, px)                                  // joint gauche
     const tex = new THREE.CanvasTexture(c)
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping
-    const rep = 80 / TILE_M                                   // 80 unités de sol / 0,65 m
-    tex.repeat.set(rep, rep)
+    tex.repeat.set(FLOOR_W / TILE_M, FLOOR_L / TILE_M)       // carreaux carrés de 0,65 m
     tex.anisotropy = 8
     if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace
     return tex
-  }, [])
+  }, [FLOOR_W, FLOOR_L])
 
   return (
     <>
       <RigidBody type="fixed" colliders={false}>
         <CuboidCollider args={[40, 0.5, 40]} position={[0, -0.5, 0]} />
         <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-          <planeGeometry args={[80, 80]} />
+          <planeGeometry args={[FLOOR_W, FLOOR_L]} />
           <meshStandardMaterial map={tileTex} roughness={0.85} metalness={0} />
         </mesh>
       </RigidBody>
 
       {WALLS.map((w, i) => (
-        <RigidBody key={'w' + i} type="fixed" colliders={false} position={[w.x, 1, w.z]}>
-          <CuboidCollider args={[w.w / 2, 1, w.d / 2]} />
-          <mesh receiveShadow>
-            <boxGeometry args={[w.w, 2, w.d]} />
-            <meshStandardMaterial color="#26262e" />
+        <RigidBody key={'w' + i} type="fixed" colliders={false} position={[w.x, WALL_H / 2, w.z]}>
+          <CuboidCollider args={[w.w / 2, WALL_H / 2, w.d / 2]} />
+          <mesh receiveShadow castShadow>
+            <boxGeometry args={[w.w, WALL_H, w.d]} />
+            <meshStandardMaterial color="#222633" roughness={0.95} metalness={0} />
           </mesh>
         </RigidBody>
       ))}
@@ -583,6 +593,7 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
   const { scene, animations } = useGLTF(PLAYER_URL, true)
   const sabreGltf = useGLTF(SABRE_URL, true)
   const pistolGltf = useGLTF(PISTOL_URL, true)
+  const uziGltf = useGLTF(UZI_URL, true)
 
   const cloned = useMemo(() => {
     const c = cloneSkeleton(scene)
@@ -630,7 +641,8 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
   useEffect(() => {
     const sScene = sabreGltf.scene
     const pScene = pistolGltf.scene
-    if (!handBone || !sScene || !pScene) return
+    const uScene = uziGltf.scene
+    if (!handBone || !sScene || !pScene || !uScene) return
     const holder = new THREE.Group()
     holder.scale.setScalar(WEAPON_HOLDER_SCALE)
 
@@ -646,18 +658,28 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
     pistol.rotation.set(...PISTOL_ROT)
     pistol.traverse((o) => { if (o.isMesh) o.castShadow = true })
 
-    const muzzle = new THREE.Mesh(
-      new THREE.SphereGeometry(0.04, 8, 8),
-      new THREE.MeshStandardMaterial({ color: '#fff7ae', emissive: new THREE.Color('#fde047'), emissiveIntensity: 3, transparent: true, opacity: 0.9 }),
-    )
-    muzzle.position.set(...MUZZLE_POS)
-    muzzle.visible = false
+    const uzi = uScene.clone(true)
+    uzi.scale.setScalar(UZI_SCALE)
+    uzi.position.set(...UZI_POS)
+    uzi.rotation.set(...UZI_ROT)
+    uzi.traverse((o) => { if (o.isMesh) o.castShadow = true })
 
-    holder.add(sabre); holder.add(pistol); holder.add(muzzle)
+    const mkMuzzle = (pos) => {
+      const m = new THREE.Mesh(
+        new THREE.SphereGeometry(0.04, 8, 8),
+        new THREE.MeshStandardMaterial({ color: '#fff7ae', emissive: new THREE.Color('#fde047'), emissiveIntensity: 3, transparent: true, opacity: 0.9 }),
+      )
+      m.position.set(...pos); m.visible = false
+      return m
+    }
+    const muzzle = mkMuzzle(MUZZLE_POS)
+    const uziMuzzle = mkMuzzle(UZI_MUZZLE_POS)
+
+    holder.add(sabre); holder.add(pistol); holder.add(uzi); holder.add(muzzle); holder.add(uziMuzzle)
     handBone.add(holder)
-    rig.current = { sabre, pistol, muzzle }
+    rig.current = { sabre, pistol, uzi, muzzle, uziMuzzle }
     return () => { handBone.remove(holder); rig.current = null }
-  }, [handBone, sabreGltf.scene, pistolGltf.scene])
+  }, [handBone, sabreGltf.scene, pistolGltf.scene, uziGltf.scene])
 
   useFrame((state) => {
     const now = state.clock.elapsedTime
@@ -689,10 +711,13 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
     // armes : visibilité selon l'arme + flash
     const r = rig.current
     if (r) {
-      const isSabre = weaponRef.current === 'sabre'
-      r.sabre.visible = isSabre
-      r.pistol.visible = !isSabre
-      r.muzzle.visible = !isSabre && now < muzzleUntil.current
+      const w = weaponRef.current
+      r.sabre.visible = w === 'sabre'
+      r.pistol.visible = w === 'pistol'
+      r.uzi.visible = w === 'uzi'
+      const flash = now < muzzleUntil.current
+      r.muzzle.visible = w === 'pistol' && flash
+      r.uziMuzzle.visible = w === 'uzi' && flash
     }
   })
 
@@ -703,7 +728,7 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
   )
 }
 
-function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, hasPistolRef, hungerRef, onWeapon, onAmmo, playing }) {
+function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, uziAmmoRef, hasPistolRef, hasUziRef, hungerRef, onWeapon, onAmmo, onUziAmmo, playing }) {
   const body = useRef()
   const visual = useRef()
   const keys = useKeyboard()
@@ -721,14 +746,24 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
 
   const triggerAttack = (name) => { attackRef.current = { id: attackRef.current.id + 1, name } }
 
+  const setWeapon = useCallback((w) => {
+    if (w === 'pistol' && !hasPistolRef.current) return
+    if (w === 'uzi' && !hasUziRef.current) return
+    if (weaponRef.current !== w) { weaponRef.current = w; onWeapon(w) }
+  }, [onWeapon, hasPistolRef, hasUziRef])
+  const cycleWeapon = useCallback(() => {
+    const list = ['sabre']
+    if (hasPistolRef.current) list.push('pistol')
+    if (hasUziRef.current) list.push('uzi')
+    const i = list.indexOf(weaponRef.current)
+    setWeapon(list[(i + 1) % list.length])
+  }, [setWeapon, hasPistolRef, hasUziRef])
+
   useEffect(() => {
-    const setWeapon = (w) => {
-      if (w === 'pistol' && !hasPistolRef.current) return
-      if (weaponRef.current !== w) { weaponRef.current = w; onWeapon(w) }
-    }
     const onKeyDown = (e) => {
       if (e.code === 'Digit1' || e.code === 'Numpad1') setWeapon('sabre')
       else if (e.code === 'Digit2' || e.code === 'Numpad2') setWeapon('pistol')
+      else if (e.code === 'Digit3' || e.code === 'Numpad3') setWeapon('uzi')
       if (e.code === 'Space') spaceHeld.current = true
     }
     const onKeyUp = (e) => { if (e.code === 'Space') spaceHeld.current = false }
@@ -739,7 +774,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
       const now = performance.now()
       if (now - lastWheel < 200) return
       lastWheel = now
-      setWeapon(weaponRef.current === 'sabre' ? 'pistol' : 'sabre')
+      cycleWeapon()
     }
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
@@ -748,6 +783,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
     window.addEventListener('wheel', onWheel)
     onWeapon(weaponRef.current)
     onAmmo(ammoRef.current)
+    onUziAmmo(uziAmmoRef.current)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
@@ -755,7 +791,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
       window.removeEventListener('pointerup', onPointerUp)
       window.removeEventListener('wheel', onWheel)
     }
-  }, [onWeapon, onAmmo, ammoRef, hasPistolRef])
+  }, [setWeapon, cycleWeapon, onWeapon, onAmmo, onUziAmmo])
 
   useFrame((state) => {
     if (!body.current) return
@@ -819,10 +855,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
     // changement d'arme à la manette (RB ou Y), sur front montant
     if (gp) {
       const sw = !!(gp.buttons[5]?.pressed || gp.buttons[3]?.pressed)
-      if (sw && !gpSwitchPrev.current) {
-        const next = weaponRef.current === 'sabre' ? 'pistol' : 'sabre'
-        if (!(next === 'pistol' && !hasPistolRef.current)) { weaponRef.current = next; onWeapon(next) }
-      }
+      if (sw && !gpSwitchPrev.current) cycleWeapon()
       gpSwitchPrev.current = sw
     }
 
@@ -830,7 +863,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
     const weapon = weaponRef.current
     const gpFire = !!(gp && ((gp.buttons[7]?.value || 0) > 0.3 || gp.buttons[0]?.pressed))
     const firing = mouseHeld.current || spaceHeld.current || gpFire
-    const cd = weapon === 'sabre' ? SABRE_COOLDOWN : PISTOL_COOLDOWN
+    const cd = weapon === 'sabre' ? SABRE_COOLDOWN : weapon === 'uzi' ? UZI_COOLDOWN : PISTOL_COOLDOWN
 
     if (firing && now - lastUse.current > cd) {
       const fx = Math.sin(yaw.current)
@@ -856,6 +889,17 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
           }
         })
         if (kills.length) killZombies(kills)
+      } else if (weapon === 'uzi') {
+        if (uziAmmoRef.current > 0) {
+          lastUse.current = now
+          const ang = Math.atan2(fx, fz) + (Math.random() * 2 - 1) * UZI_BULLET_SPREAD   // dispersion rafale
+          const sfx = Math.sin(ang), sfz = Math.cos(ang)
+          bulletsRef.current?.fire(t.x + sfx * 0.7, t.z + sfz * 0.7, sfx, sfz)
+          Sfx.shoot()
+          triggerAttack('shoot')
+          uziAmmoRef.current -= 1
+          onUziAmmo(uziAmmoRef.current)
+        }
       } else if (ammoRef.current > 0) {
         lastUse.current = now
         bulletsRef.current?.fire(t.x + fx * 0.7, t.z + fz * 0.7, fx, fz)
@@ -1146,7 +1190,7 @@ function Zombie({ id, spawn, armored, female, gait, speedMul, dying, posRef, reg
 /* ---------------------------------------------------------------- */
 /* Logique de jeu (mémoïsée)                                         */
 /* ---------------------------------------------------------------- */
-const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, onAmmo, onPistol, onSurvival, onPickup }) {
+const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, onAmmo, onUziAmmo, onPistol, onUzi, onSurvival, onPickup }) {
   const playerPos = useRef(new THREE.Vector3(0, 0.9, 0))
   const registry = useRef(new Map())
   const bulletsRef = useRef()
@@ -1167,7 +1211,9 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
 
   const hungerRef = useRef(HUNGER_MAX)
   const ammoRef = useRef(START_AMMO)
+  const uziAmmoRef = useRef(0)
   const hasPistolRef = useRef(START_HAS_PISTOL)
+  const hasUziRef = useRef(false)
   const shelfStates = useRef(STOREFRONTS.map(() => ({ available: true, cooldownUntil: 0 })))
   const searchProgress = useRef(0)
   const promptRef = useRef(false)
@@ -1202,11 +1248,20 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         onAmmo(ammoRef.current)
         Sfx.pickup('pistol')
         onPickup('🔫 Armurerie : pistolet + munitions !')
+      } else if (!hasUziRef.current) {
+        hasUziRef.current = true
+        uziAmmoRef.current += UZI_AMMO_BONUS
+        onUzi(true)
+        onUziAmmo(uziAmmoRef.current)
+        Sfx.pickup('pistol')
+        onPickup('💥 Armurerie : Uzi + ' + UZI_AMMO_BONUS + ' balles !')
       } else {
         ammoRef.current += AMMO_PICKUP + 6
+        uziAmmoRef.current += 80
         onAmmo(ammoRef.current)
+        onUziAmmo(uziAmmoRef.current)
         Sfx.pickup('ammo')
-        onPickup('🔫 Armurerie : munitions +' + (AMMO_PICKUP + 6))
+        onPickup('🔫 Armurerie : munitions (pistolet + Uzi)')
       }
     } else if (shop === 'pharmacie') {
       onHeal(45)
@@ -1222,7 +1277,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       Sfx.pickup('food')
       onPickup('🥖 Boulangerie : +faim')
     }
-  }, [onPistol, onAmmo, onHeal, onPickup])
+  }, [onPistol, onUzi, onAmmo, onUziAmmo, onHeal, onPickup])
 
   useFrame((state, dt) => {
     const now = state.clock.elapsedTime
@@ -1246,7 +1301,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         const female = !armored && Math.random() < 0.5
         const gait = Math.random() < 0.5 ? 'limp' : 'unsteady'
         const speedMul = 0.85 + Math.random() * 0.3 + Math.min(0.4, wave * 0.02)
-        const endZ = (Math.random() < 0.5 ? -1 : 1) * (CORRIDOR_HL - 1.5)
+        const endZ = -(CORRIDOR_HL - 1.5)   // uniquement le haut de l'écran (fond du couloir)
         const sx = (Math.random() * 2 - 1) * (CORRIDOR_HW - 1.2)
         setZombies((zs) => [...zs, { id: idRef.current++, spawn: [sx, endZ], armored, female, gait, speedMul }])
       }
@@ -1352,10 +1407,13 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         bulletsRef={bulletsRef}
         shelfRectsRef={shelfRects}
         ammoRef={ammoRef}
+        uziAmmoRef={uziAmmoRef}
         hasPistolRef={hasPistolRef}
+        hasUziRef={hasUziRef}
         hungerRef={hungerRef}
         onWeapon={onWeapon}
         onAmmo={onAmmo}
+        onUziAmmo={onUziAmmo}
         playing={playing}
       />
       {zombies.map((z) => (
@@ -1408,7 +1466,7 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, toast, wave, banner, countdown, remaining, playing, muted, onToggleMute }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, playing, muted, onToggleMute }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
       <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
@@ -1451,6 +1509,7 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
       <div style={{ position: 'absolute', bottom: 56, left: 20, display: 'flex', gap: 10 }}>
         <WeaponSlot keyLabel="1" name="Sabre" sub="∞" active={weapon === 'sabre'} />
         <WeaponSlot keyLabel="2" name="Pistolet" sub={ammo} danger={ammo === 0} active={weapon === 'pistol'} locked={!hasPistol} />
+        <WeaponSlot keyLabel="3" name="Uzi" sub={uziAmmo} danger={uziAmmo === 0} active={weapon === 'uzi'} locked={!hasUzi} />
       </div>
 
       {toast && (
@@ -1471,7 +1530,7 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, search, prompt, t
       ) : null}
 
       <div style={{ position: 'absolute', bottom: 16, left: 0, right: 0, textAlign: 'center', fontSize: 13, opacity: 0.55 }}>
-        ZQSD / stick bouger · souris / stick droit viser · clic / Espace / RT attaquer · 1 / 2 / RB changer d'arme · E / X fouiller
+        ZQSD / stick bouger · souris / stick droit viser · clic / Espace / RT attaquer · 1 / 2 / 3 / RB changer d'arme · E / X fouiller
       </div>
 
       <button onClick={onToggleMute} title={muted ? 'Activer le son' : 'Couper le son'} style={{
@@ -1517,7 +1576,7 @@ function StartScreen({ onPlay }) {
           Déplacement — ZQSD / stick gauche<br />
           Viser — Souris / stick droit<br />
           Attaquer — Clic / Espace / RT<br />
-          Changer d'arme — 1 / 2 / RB<br />
+          Changer d'arme — 1 / 2 / 3 / RB<br />
           Fouiller — E / X (maintenir)
         </Panel>
         <Panel title="SURVIE">
@@ -1566,6 +1625,8 @@ export default function App() {
   const [weapon, setWeapon] = useState('sabre')
   const [ammo, setAmmo] = useState(START_AMMO)
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
+  const [uziAmmo, setUziAmmo] = useState(0)
+  const [hasUzi, setHasUzi] = useState(false)
   const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0 })
   const [toast, setToast] = useState(null)
   const [muted, setMuted] = useState(false)
@@ -1584,6 +1645,8 @@ export default function App() {
   const handleWeapon = useCallback((w) => setWeapon(w), [])
   const handleAmmo = useCallback((n) => setAmmo(n), [])
   const handlePistol = useCallback((v) => setHasPistol(v), [])
+  const handleUziAmmo = useCallback((n) => setUziAmmo(n), [])
+  const handleUzi = useCallback((v) => setHasUzi(v), [])
   const handleSurvival = useCallback((s) => setSurvival(s), [])
   const handlePickup = useCallback((text) => {
     setToast(text)
@@ -1600,6 +1663,8 @@ export default function App() {
     setWeapon('sabre')
     setAmmo(START_AMMO)
     setHasPistol(START_HAS_PISTOL)
+    setUziAmmo(0)
+    setHasUzi(false)
     setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0 })
     setToast(null)
     setGameKey((k) => k + 1)
@@ -1622,7 +1687,9 @@ export default function App() {
               onKill={handleKill}
               onWeapon={handleWeapon}
               onAmmo={handleAmmo}
+              onUziAmmo={handleUziAmmo}
               onPistol={handlePistol}
+              onUzi={handleUzi}
               onSurvival={handleSurvival}
               onPickup={handlePickup}
             />
@@ -1636,6 +1703,8 @@ export default function App() {
         weapon={weapon}
         ammo={ammo}
         hasPistol={hasPistol}
+        uziAmmo={uziAmmo}
+        hasUzi={hasUzi}
         search={survival.search}
         prompt={survival.prompt}
         toast={toast}
