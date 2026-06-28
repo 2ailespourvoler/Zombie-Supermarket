@@ -120,6 +120,7 @@ const WAVE_DUR_MIN = 20             // plancher de durée (s)
 const WAVE_COUNT_BASE = 8           // nombre de zombies à la vague 1
 const WAVE_COUNT_STEP = 2           // +2 zombies par vague
 const WAVE_COUNT_MAX = 40           // plafond de zombies par vague
+const WAVE_BURST_INTERVAL = 0.15    // temps entre 2 zombies d'une même vague (salve quasi groupée)
 const BANNER_DURATION = 2.2         // durée d'affichage de l'annonce "VAGUE N"
 const waveCount = (w) => Math.min(WAVE_COUNT_MAX, WAVE_COUNT_BASE + (w - 1) * WAVE_COUNT_STEP)
 const waveDuration = (w) => Math.max(WAVE_DUR_MIN, WAVE_DURATION - (w - 1) * WAVE_DUR_STEP)
@@ -127,9 +128,11 @@ const waveDuration = (w) => Math.max(WAVE_DUR_MIN, WAVE_DURATION - (w - 1) * WAV
 /* Vue subjective (test) — touche V */
 const FPS_EYE_Y = 0.7    // hauteur des yeux au-dessus du centre du corps
 const FPS_FWD = 0.25     // caméra légèrement devant le visage (le corps reste derrière)
+const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif, plus bas = plus doux)
+const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : vagues-fixes + FPS (V)'
+const BUILD_TAG = 'build : vagues-salve-temps'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -316,14 +319,21 @@ function useKeyboard() {
 /* ---------------------------------------------------------------- */
 function FollowCamera({ target, aimRef, modeRef }) {
   const { camera } = useThree()
-  useFrame(() => {
+  const fpsYaw = useRef(0)
+  useFrame((state, dt) => {
     const p = target.current
     if (modeRef && modeRef.current === 'fps') {
-      const y = aimRef ? aimRef.current : 0
-      const fx = Math.sin(y), fz = Math.cos(y)
+      // rotation amortie (chemin le plus court, gère le passage ±π)
+      const tgt = aimRef ? aimRef.current : 0
+      let d = tgt - fpsYaw.current
+      d = Math.atan2(Math.sin(d), Math.cos(d))
+      fpsYaw.current += d * Math.min(1, dt * FPS_TURN_SMOOTH)
+      const fx = Math.sin(fpsYaw.current), fz = Math.cos(fpsYaw.current)
       const eyeY = p.y + FPS_EYE_Y
-      camera.position.set(p.x + fx * FPS_FWD, eyeY, p.z + fz * FPS_FWD)
-      camera.lookAt(p.x + fx * 10, eyeY, p.z + fz * 10)
+      // position lissée (absorbe la vibration du corps physique)
+      camTarget.set(p.x + fx * FPS_FWD, eyeY, p.z + fz * FPS_FWD)
+      camera.position.lerp(camTarget, Math.min(1, dt * FPS_POS_SMOOTH))
+      camera.lookAt(camera.position.x + fx * 10, eyeY, camera.position.z + fz * 10)
       return
     }
     camTarget.set(p.x, p.y + 14, p.z + 11)
@@ -1474,18 +1484,18 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     const now = state.clock.elapsedTime
 
     if (playing) {
-      /* --- Vagues : `count` zombies répartis sur `duration`, puis vague suivante --- */
+      /* --- Vagues : toute la salve arrive groupée, vague suivante au nettoyage --- */
       const wave = waveRef.current
       const count = waveCount(wave)
       const duration = waveDuration(wave)
-      const interval = duration / count
 
       waveTimer.current += dt
       spawnTimer.current += dt
 
-      // 1er zombie immédiat, puis un toutes les `interval` s, jusqu'à `count`
-      if (spawnedThisWave.current < count && (spawnedThisWave.current === 0 || spawnTimer.current >= interval)) {
+      // salve : on lâche les `count` zombies en rafale rapide (quasi ensemble), en ligne
+      if (spawnedThisWave.current < count && (spawnedThisWave.current === 0 || spawnTimer.current >= WAVE_BURST_INTERVAL)) {
         spawnTimer.current = 0
+        const lane = spawnedThisWave.current
         spawnedThisWave.current += 1
         const armoredChance = Math.min(0.22, 0.04 + wave * 0.015)
         const armored = Math.random() < armoredChance
@@ -1495,12 +1505,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         const speedMul = fat
           ? FAT_SPEED_MUL
           : 0.85 + Math.random() * 0.3 + Math.min(0.4, wave * 0.02)
-        const endZ = -(CORRIDOR_HL - 1.5)   // uniquement le haut de l'écran (fond du couloir)
-        const sx = (Math.random() * 2 - 1) * (CORRIDOR_HW - 1.2)
+        const endZ = -(CORRIDOR_HL - 1.5)   // fond du couloir
+        // répartis sur la largeur (effet "ligne de zombies") + léger aléa
+        const frac = count > 1 ? lane / (count - 1) : 0.5
+        const sx = (frac * 2 - 1) * (CORRIDOR_HW - 1.4) + (Math.random() * 0.7 - 0.35)
         setZombies((zs) => [...zs, { id: idRef.current++, spawn: [sx, endZ], armored, fat, female, gait, speedMul }])
       }
 
-      // vague suivante quand la durée est écoulée
+      // vague suivante au bout du temps défini (durée), indépendamment des zombies restants
       if (waveTimer.current >= duration) {
         waveTimer.current -= duration
         waveRef.current += 1
@@ -1707,9 +1719,6 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
           textAlign: 'center', animation: 'waveIn 0.4s ease',
         }}>
           <div style={{ fontFamily: 'Georgia, serif', fontSize: 'clamp(34px, 6vw, 60px)', fontWeight: 800, letterSpacing: 3, color: '#f8f4ea', textShadow: '0 2px 20px #000' }}>{banner}</div>
-          {countdown > 0 && (
-            <div style={{ fontSize: 18, opacity: 0.8, marginTop: 8 }}>Prochaine vague dans {countdown}…</div>
-          )}
         </div>
       )}
 
