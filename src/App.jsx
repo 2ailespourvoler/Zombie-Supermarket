@@ -46,6 +46,13 @@ const FEMALE_FEET_Y = -0.8
 const FEMALE_MODEL_FACING = 0       // passe à Math.PI si elle marche "à reculons"
 useGLTF.preload(FEMALE_URL, true)
 
+const FAT_URL = '/fat_zombie.glb'
+const FAT_MODEL_SCALE = 1.32        // gros zombie : plus imposant que les autres
+const FAT_FEET_Y = -0.95            // abaissé pour compenser la plus grande échelle (à ajuster si flotte/s'enfonce)
+const FAT_MODEL_FACING = 0          // passe à Math.PI s'il marche "à reculons"
+const FAT_DEATH_SPEED = 1.8         // accélère la chute (clip "death" natif = 4,7 s, trop long)
+useGLTF.preload(FAT_URL, true)
+
 const PLAYER_URL = '/player_lite.glb'
 const PLAYER_MODEL_SCALE = 1.0      // squelette ~1,67 m
 const PLAYER_FEET_Y = -0.8
@@ -82,6 +89,8 @@ const ZOMBIE_HP = 2
 const SABRE_DAMAGE = 1          // 2 coups de sabre pour tuer
 const BULLET_DAMAGE = 2         // 1 balle pour tuer
 const ARMORED_CHANCE = 0.05     // 1 zombie-bob sur 20
+const FAT_CHANCE = 0.10         // 10 % de gros zombies
+const FAT_SPEED_MUL = 0.5       // gros zombie = lent (vitesse réduite de moitié)
 
 const SABRE_RANGE = 2.6
 const SABRE_HALF_ANGLE = 1.0
@@ -103,7 +112,7 @@ const ZOMBIE_DAMAGE = 10
 const ARENA = 24
 
 /* Vagues — arrivée continue, rythmée par le temps (la pression ne retombe jamais) */
-const WAVE_DURATION = 30         // durée d'une vague avant de passer à la suivante (s)
+const WAVE_DURATION = 45         // durée d'une vague avant de passer à la suivante (s)
 const BANNER_DURATION = 2.2      // durée d'affichage de l'annonce "VAGUE N"
 const SPAWN_BASE = 1.5           // intervalle de spawn de base (s)
 const SPAWN_STEP = 0.07          // l'intervalle se réduit à chaque vague
@@ -253,6 +262,7 @@ const Sfx = (() => {
     ensure,
     setMuted(m) { muted = m; if (master) master.gain.value = m ? 0 : BASE },
     shoot() { ensure(); noise({ dur: 0.12, gain: 0.6, type: 'lowpass', f: 1800, sweepTo: 300 }); blip({ type: 'square', f0: 150, f1: 50, dur: 0.1, gain: 0.22 }) },
+    uziShot() { ensure(); noise({ dur: 0.05, gain: 0.5, type: 'highpass', f: 1200, sweepTo: 600 }); blip({ type: 'square', f0: 220, f1: 70, dur: 0.045, gain: 0.18 }) },
     sabre() { ensure(); noise({ dur: 0.18, gain: 0.3, type: 'bandpass', f: 2400, q: 1.2, sweepTo: 600 }) },
     death() { ensure(); blip({ type: 'sawtooth', f0: 200, f1: 50, dur: 0.22, gain: 0.28 }); noise({ dur: 0.14, gain: 0.2, type: 'lowpass', f: 800 }) },
     hurt() { ensure(); const now = ctx ? ctx.currentTime : 0; if (now - lastHurt < 0.15) return; lastHurt = now; blip({ type: 'square', f0: 220, f1: 110, dur: 0.18, gain: 0.3 }) },
@@ -369,6 +379,73 @@ function Arena() {
       ))}
     </>
   )
+}
+
+/* ---------------------------------------------------------------- */
+/* Décor : bancs + bacs à plantes (fixes, alignés au centre)         */
+/* ---------------------------------------------------------------- */
+const BENCH_ZS = [-15, -7, 7, 15]   // 4 blocs ; le centre (z≈0) reste libre pour le départ du joueur
+
+function Planter({ z }) {
+  return (
+    <group position={[0, 0, z]}>
+      <mesh castShadow receiveShadow position={[0, 0.25, 0]}>
+        <boxGeometry args={[0.7, 0.5, 0.7]} />
+        <meshStandardMaterial color="#6f4a34" roughness={0.9} metalness={0} />
+      </mesh>
+      <mesh position={[0, 0.5, 0]}>
+        <boxGeometry args={[0.6, 0.06, 0.6]} />
+        <meshStandardMaterial color="#2e211a" roughness={1} metalness={0} />
+      </mesh>
+      <mesh castShadow position={[0, 0.76, 0]}>
+        <icosahedronGeometry args={[0.34, 0]} />
+        <meshStandardMaterial color="#3f7d3a" roughness={1} metalness={0} flatShading />
+      </mesh>
+      <mesh castShadow position={[0.18, 0.62, 0.1]}>
+        <icosahedronGeometry args={[0.22, 0]} />
+        <meshStandardMaterial color="#4c9043" roughness={1} metalness={0} flatShading />
+      </mesh>
+      <mesh castShadow position={[-0.16, 0.64, -0.12]}>
+        <icosahedronGeometry args={[0.2, 0]} />
+        <meshStandardMaterial color="#357036" roughness={1} metalness={0} flatShading />
+      </mesh>
+    </group>
+  )
+}
+
+function BenchBlock({ z }) {
+  const wood = '#7c5a3a'
+  const metal = '#2b2f3a'
+  return (
+    <RigidBody type="fixed" colliders={false} position={[0, 0, z]}>
+      {/* un seul collider couvrant bancs + bacs : îlot infranchissable */}
+      <CuboidCollider args={[0.5, 0.5, 1.85]} position={[0, 0.5, 0]} />
+      {/* pieds métal */}
+      {[-0.85, 0.85].map((zz, i) => (
+        <mesh key={i} castShadow receiveShadow position={[0, 0.22, zz]}>
+          <boxGeometry args={[0.92, 0.44, 0.12]} />
+          <meshStandardMaterial color={metal} roughness={0.6} metalness={0.3} />
+        </mesh>
+      ))}
+      {/* assise double face */}
+      <mesh castShadow receiveShadow position={[0, 0.46, 0]}>
+        <boxGeometry args={[0.9, 0.08, 2.2]} />
+        <meshStandardMaterial color={wood} roughness={0.85} metalness={0} />
+      </mesh>
+      {/* dossier central */}
+      <mesh castShadow receiveShadow position={[0, 0.72, 0]}>
+        <boxGeometry args={[0.1, 0.42, 2.2]} />
+        <meshStandardMaterial color={wood} roughness={0.85} metalness={0} />
+      </mesh>
+      {/* bacs à plantes aux deux bouts, dans le sens de la galerie */}
+      <Planter z={1.45} />
+      <Planter z={-1.45} />
+    </RigidBody>
+  )
+}
+
+function BenchRow() {
+  return <>{BENCH_ZS.map((z) => <BenchBlock key={z} z={z} />)}</>
 }
 
 /* ---------------------------------------------------------------- */
@@ -504,14 +581,20 @@ function LootIndicators({ indicatorsRef }) {
 /* ---------------------------------------------------------------- */
 /* Balles                                                            */
 /* ---------------------------------------------------------------- */
+/* Couleurs des traçantes (réutilisées chaque frame, sans réallocation) */
+const TRACER_COLORS = {
+  uzi:    { core: new THREE.Color('#fff0c0'), glow: new THREE.Color('#ff3b1f') }, // orange -> rouge
+  pistol: { core: new THREE.Color('#fff8d0'), glow: new THREE.Color('#fde047') }, // jaune
+}
+
 const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsRef, playing }, ref) {
   const meshes = useRef([])
   const active = useRef([])
 
   useImperativeHandle(ref, () => ({
-    fire(x, z, dx, dz) {
+    fire(x, z, dx, dz, kind = 'pistol') {
       if (active.current.length >= BULLET_POOL) return
-      active.current.push({ x, z, dx, dz, life: BULLET_LIFE })
+      active.current.push({ x, z, dx, dz, ang: Math.atan2(dx, dz), kind, life: BULLET_LIFE })
     },
   }), [])
 
@@ -562,13 +645,20 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsR
 
     const m = meshes.current
     for (let i = 0; i < BULLET_POOL; i++) {
-      const mesh = m[i]
-      if (!mesh) continue
+      const grp = m[i]
+      if (!grp) continue
       if (i < arr.length) {
-        mesh.visible = true
-        mesh.position.set(arr[i].x, 0.9, arr[i].z)
+        const b = arr[i]
+        grp.visible = true
+        grp.position.set(b.x, 0.9, b.z)
+        grp.rotation.y = b.ang
+        const col = TRACER_COLORS[b.kind] || TRACER_COLORS.pistol
+        const core = grp.children[0]?.material
+        const glow = grp.children[1]?.material
+        if (core) { core.color.copy(col.core); core.emissive.copy(col.glow) }
+        if (glow) glow.color.copy(col.glow)
       } else {
-        mesh.visible = false
+        grp.visible = false
       }
     }
   })
@@ -576,10 +666,18 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsR
   return (
     <group>
       {Array.from({ length: BULLET_POOL }).map((_, i) => (
-        <mesh key={i} ref={(el) => (meshes.current[i] = el)} visible={false}>
-          <sphereGeometry args={[0.13, 8, 8]} />
-          <meshStandardMaterial color="#fde047" emissive="#fde047" emissiveIntensity={2.5} />
-        </mesh>
+        <group key={i} ref={(el) => (meshes.current[i] = el)} visible={false}>
+          {/* cœur lumineux, allongé dans le sens du tir (+Z) */}
+          <mesh>
+            <boxGeometry args={[0.05, 0.05, 0.55]} />
+            <meshStandardMaterial color="#fff0c0" emissive="#ff3b1f" emissiveIntensity={3} toneMapped={false} />
+          </mesh>
+          {/* halo additif diffus */}
+          <mesh>
+            <boxGeometry args={[0.15, 0.15, 1.0]} />
+            <meshBasicMaterial color="#ff3b1f" transparent opacity={0.35} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+          </mesh>
+        </group>
       ))}
     </group>
   )
@@ -894,15 +992,15 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
           lastUse.current = now
           const ang = Math.atan2(fx, fz) + (Math.random() * 2 - 1) * UZI_BULLET_SPREAD   // dispersion rafale
           const sfx = Math.sin(ang), sfz = Math.cos(ang)
-          bulletsRef.current?.fire(t.x + sfx * 0.7, t.z + sfz * 0.7, sfx, sfz)
-          Sfx.shoot()
+          bulletsRef.current?.fire(t.x + sfx * 0.7, t.z + sfz * 0.7, sfx, sfz, 'uzi')
+          Sfx.uziShot()
           triggerAttack('shoot')
           uziAmmoRef.current -= 1
           onUziAmmo(uziAmmoRef.current)
         }
       } else if (ammoRef.current > 0) {
         lastUse.current = now
-        bulletsRef.current?.fire(t.x + fx * 0.7, t.z + fz * 0.7, fx, fz)
+        bulletsRef.current?.fire(t.x + fx * 0.7, t.z + fz * 0.7, fx, fz, 'pistol')
         Sfx.shoot()
         triggerAttack('shoot')
         ammoRef.current -= 1
@@ -1110,7 +1208,64 @@ function FemaleModel({ gait, speedMul, stateRef, entryRef }) {
   )
 }
 
-function Zombie({ id, spawn, armored, female, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
+/* Modèle 3D animé du gros zombie (lent, imposant) */
+function FatZombieModel({ gait, speedMul, stateRef, entryRef }) {
+  const { scene, animations } = useGLTF(FAT_URL, true)
+  const cloned = useMemo(() => {
+    const c = cloneSkeleton(scene)
+    c.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true
+        o.frustumCulled = false
+        o.material = o.material.clone()
+        o.material.metalness = 0
+        o.material.roughness = 1
+      }
+    })
+    return c
+  }, [scene])
+  const mats = useMemo(() => {
+    const arr = []
+    cloned.traverse((o) => { if (o.isMesh) arr.push(o.material) })
+    return arr
+  }, [cloned])
+
+  const group = useRef()
+  const { actions } = useAnimations(animations, group)
+  const current = useRef(null)
+
+  useEffect(() => {
+    const a = actions[gait]
+    if (a) { a.reset(); a.timeScale = speedMul; a.fadeIn(0.2).play() }
+    current.current = gait
+    if (actions.death) { actions.death.setLoop(THREE.LoopOnce, 1); actions.death.clampWhenFinished = true }
+    return () => { Object.values(actions).forEach((act) => act && act.stop()) }
+  }, [actions, gait, speedMul])
+
+  useFrame((state) => {
+    // pas de clip "grab" pour le gros zombie -> il continue de marcher en attaquant
+    const desired = stateRef.current === 'death' ? 'death' : gait
+    if (desired !== current.current && actions[desired]) {
+      const next = actions[desired]
+      const prev = actions[current.current]
+      next.reset()
+      if (desired === 'death') { next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = true; next.timeScale = FAT_DEATH_SPEED; next.fadeIn(0.12).play() }
+      else { next.timeScale = speedMul; next.fadeIn(0.15).play() }
+      if (prev && prev !== next) prev.fadeOut(0.15)
+      current.current = desired
+    }
+    const f = state.clock.elapsedTime - entryRef.current.hitFlash < 0.12
+    for (const m of mats) m.emissive.setRGB(f ? 0.5 : 0, 0, 0)
+  })
+
+  return (
+    <group ref={group} position={[0, FAT_FEET_Y, 0]} rotation={[0, FAT_MODEL_FACING, 0]} scale={FAT_MODEL_SCALE}>
+      <primitive object={cloned} />
+    </group>
+  )
+}
+
+function Zombie({ id, spawn, armored, fat, female, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
   const body = useRef()
   const visual = useRef()
   const stateRef = useRef('walk')
@@ -1130,7 +1285,7 @@ function Zombie({ id, spawn, armored, female, gait, speedMul, dying, posRef, reg
     entry.current.dying = true
     stateRef.current = 'death'
     registry.current.delete(id)
-    const ms = 2300   // laisse le corps jouer sa mort avant suppression
+    const ms = fat ? 2800 : 2300   // laisse le corps jouer sa mort avant suppression
     const tmr = setTimeout(() => onRemove(id), ms)
     return () => clearTimeout(tmr)
   }, [dying, armored, id, onRemove, registry])
@@ -1170,12 +1325,14 @@ function Zombie({ id, spawn, armored, female, gait, speedMul, dying, posRef, reg
       position={[spawn[0], 1, spawn[1]]}
       colliders={false}
       enabledRotations={[false, false, false]}
-      mass={armored ? 1.6 : 1}
+      mass={fat ? 2.2 : armored ? 1.6 : 1}
       linearDamping={0.5}
     >
-      <CapsuleCollider args={[0.4, 0.4]} />
+      <CapsuleCollider args={fat ? [0.45, 0.55] : [0.4, 0.4]} />
       <group ref={visual}>
-        {armored ? (
+        {fat ? (
+          <FatZombieModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
+        ) : armored ? (
           <BobModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
         ) : female ? (
           <FemaleModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
@@ -1298,12 +1455,15 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         spawnTimer.current = 0
         const armoredChance = Math.min(0.22, 0.04 + wave * 0.015)
         const armored = Math.random() < armoredChance
-        const female = !armored && Math.random() < 0.5
-        const gait = Math.random() < 0.5 ? 'limp' : 'unsteady'
-        const speedMul = 0.85 + Math.random() * 0.3 + Math.min(0.4, wave * 0.02)
+        const fat = !armored && Math.random() < FAT_CHANCE
+        const female = !armored && !fat && Math.random() < 0.5
+        const gait = fat ? 'limp' : (Math.random() < 0.5 ? 'limp' : 'unsteady')
+        const speedMul = fat
+          ? FAT_SPEED_MUL
+          : 0.85 + Math.random() * 0.3 + Math.min(0.4, wave * 0.02)
         const endZ = -(CORRIDOR_HL - 1.5)   // uniquement le haut de l'écran (fond du couloir)
         const sx = (Math.random() * 2 - 1) * (CORRIDOR_HW - 1.2)
-        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [sx, endZ], armored, female, gait, speedMul }])
+        setZombies((zs) => [...zs, { id: idRef.current++, spawn: [sx, endZ], armored, fat, female, gait, speedMul }])
       }
 
       /* Faim + famine */
@@ -1397,6 +1557,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       <FollowCamera target={playerPos} />
       <Lights />
       <Arena />
+      <BenchRow />
       <Storefronts />
       <LootIndicators indicatorsRef={indicatorsRef} />
       <Bullets ref={bulletsRef} registry={registry} killZombies={killZombies} shelfRectsRef={shelfRects} playing={playing} />
@@ -1422,6 +1583,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           id={z.id}
           spawn={z.spawn}
           armored={z.armored}
+          fat={z.fat}
           female={z.female}
           gait={z.gait}
           speedMul={z.speedMul}
