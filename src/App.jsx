@@ -47,7 +47,7 @@ const FEMALE_MODEL_FACING = 0       // passe à Math.PI si elle marche "à recul
 useGLTF.preload(FEMALE_URL, true)
 
 const FAT_URL = '/fat_zombie.glb'
-const FAT_MODEL_SCALE = 1.32        // gros zombie : plus imposant que les autres
+const FAT_MODEL_SCALE = 1.20        // gros zombie : plus imposant que les autres
 const FAT_FEET_Y = -0.95            // abaissé pour compenser la plus grande échelle (à ajuster si flotte/s'enfonce)
 const FAT_MODEL_FACING = 0          // passe à Math.PI s'il marche "à reculons"
 const FAT_DEATH_SPEED = 1.8         // accélère la chute (clip "death" natif = 4,7 s, trop long)
@@ -91,6 +91,8 @@ const BULLET_DAMAGE = 2         // 1 balle pour tuer
 const ARMORED_CHANCE = 0.05     // 1 zombie-bob sur 20
 const FAT_CHANCE = 0.10         // 10 % de gros zombies
 const FAT_SPEED_MUL = 0.5       // gros zombie = lent (vitesse réduite de moitié)
+const FAT_HP = 4                // 2 balles pour tuer (BULLET_DAMAGE=2 -> 4/2 = 2 tirs)
+const FAT_SABRE_DAMAGE = 2      // 2 coups de sabre pour tuer (4/2 = 2 coups)
 
 const SABRE_RANGE = 2.6
 const SABRE_HALF_ANGLE = 1.0
@@ -112,11 +114,15 @@ const ZOMBIE_DAMAGE = 10
 const ARENA = 24
 
 /* Vagues — arrivée continue, rythmée par le temps (la pression ne retombe jamais) */
-const WAVE_DURATION = 45         // durée d'une vague avant de passer à la suivante (s)
-const BANNER_DURATION = 2.2      // durée d'affichage de l'annonce "VAGUE N"
-const SPAWN_BASE = 1.5           // intervalle de spawn de base (s)
-const SPAWN_STEP = 0.07          // l'intervalle se réduit à chaque vague
-const SPAWN_MIN = 0.45           // intervalle minimal (cadence max)
+const WAVE_DURATION = 45            // durée de la vague 1 (s) ; -2 s par vague ensuite
+const WAVE_DUR_STEP = 2             // réduction de durée par vague
+const WAVE_DUR_MIN = 20             // plancher de durée (s)
+const WAVE_COUNT_BASE = 8           // nombre de zombies à la vague 1
+const WAVE_COUNT_STEP = 2           // +2 zombies par vague
+const WAVE_COUNT_MAX = 40           // plafond de zombies par vague
+const BANNER_DURATION = 2.2         // durée d'affichage de l'annonce "VAGUE N"
+const waveCount = (w) => Math.min(WAVE_COUNT_MAX, WAVE_COUNT_BASE + (w - 1) * WAVE_COUNT_STEP)
+const waveDuration = (w) => Math.max(WAVE_DUR_MIN, WAVE_DURATION - (w - 1) * WAVE_DUR_STEP)
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -980,7 +986,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
           if (d < SABRE_RANGE && d > 0.001) {
             const dot = (vx / d) * fx + (vz / d) * fz
             if (dot > cosHalf && !losBlocked(shelfRectsRef.current, t.x, t.z, z.pos.x, z.pos.z)) {
-              z.hp -= SABRE_DAMAGE
+              z.hp -= z.fat ? FAT_SABRE_DAMAGE : SABRE_DAMAGE
               z.hitFlash = now
               if (z.hp <= 0) kills.push(id)
             }
@@ -1271,7 +1277,7 @@ function Zombie({ id, spawn, armored, fat, female, gait, speedMul, dying, posRef
   const stateRef = useRef('walk')
   const entry = useRef({
     pos: new THREE.Vector3(spawn[0], 1, spawn[1]),
-    lastHit: -10, hp: ZOMBIE_HP, armored, hitFlash: -10, armorSpark: -10, dying: false,
+    lastHit: -10, hp: fat ? FAT_HP : ZOMBIE_HP, armored, fat, hitFlash: -10, armorSpark: -10, dying: false,
   })
 
   useEffect(() => {
@@ -1361,9 +1367,10 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const countRef = useRef(0)
   const spawnTimer = useRef(0)
 
-  // Système de vagues — continu, rythmé par le temps
+  // Système de vagues — N zombies répartis sur une durée, puis vague suivante
   const waveRef = useRef(1)
   const waveTimer = useRef(0)
+  const spawnedThisWave = useRef(0)
   const bannerUntil = useRef(BANNER_DURATION)
 
   const hungerRef = useRef(HUNGER_MAX)
@@ -1440,19 +1447,19 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     const now = state.clock.elapsedTime
 
     if (playing) {
-      /* --- Vagues : arrivée continue rythmée par le temps --- */
-      waveTimer.current += dt
-      if (waveTimer.current >= WAVE_DURATION) {
-        waveTimer.current -= WAVE_DURATION
-        waveRef.current += 1
-        bannerUntil.current = now + BANNER_DURATION
-        Sfx.waveStart()
-      }
+      /* --- Vagues : `count` zombies répartis sur `duration`, puis vague suivante --- */
       const wave = waveRef.current
-      const interval = Math.max(SPAWN_MIN, SPAWN_BASE - wave * SPAWN_STEP)
+      const count = waveCount(wave)
+      const duration = waveDuration(wave)
+      const interval = duration / count
+
+      waveTimer.current += dt
       spawnTimer.current += dt
-      if (spawnTimer.current >= interval) {
+
+      // 1er zombie immédiat, puis un toutes les `interval` s, jusqu'à `count`
+      if (spawnedThisWave.current < count && (spawnedThisWave.current === 0 || spawnTimer.current >= interval)) {
         spawnTimer.current = 0
+        spawnedThisWave.current += 1
         const armoredChance = Math.min(0.22, 0.04 + wave * 0.015)
         const armored = Math.random() < armoredChance
         const fat = !armored && Math.random() < FAT_CHANCE
@@ -1464,6 +1471,16 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         const endZ = -(CORRIDOR_HL - 1.5)   // uniquement le haut de l'écran (fond du couloir)
         const sx = (Math.random() * 2 - 1) * (CORRIDOR_HW - 1.2)
         setZombies((zs) => [...zs, { id: idRef.current++, spawn: [sx, endZ], armored, fat, female, gait, speedMul }])
+      }
+
+      // vague suivante quand la durée est écoulée
+      if (waveTimer.current >= duration) {
+        waveTimer.current -= duration
+        waveRef.current += 1
+        spawnedThisWave.current = 0
+        spawnTimer.current = 0
+        bannerUntil.current = now + BANNER_DURATION
+        Sfx.waveStart()
       }
 
       /* Faim + famine */
@@ -1528,7 +1545,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         lastPush.current = now
         const w = waveRef.current
         const banner = now < bannerUntil.current ? 'VAGUE ' + w : null
-        const countdown = Math.max(0, Math.ceil(WAVE_DURATION - waveTimer.current))
+        const countdown = Math.max(0, Math.ceil(waveDuration(w) - waveTimer.current))
         onSurvival({
           hunger: hungerRef.current,
           search: searchProgress.current,
