@@ -124,6 +124,13 @@ const BANNER_DURATION = 2.2         // durée d'affichage de l'annonce "VAGUE N"
 const waveCount = (w) => Math.min(WAVE_COUNT_MAX, WAVE_COUNT_BASE + (w - 1) * WAVE_COUNT_STEP)
 const waveDuration = (w) => Math.max(WAVE_DUR_MIN, WAVE_DURATION - (w - 1) * WAVE_DUR_STEP)
 
+/* Vue subjective (test) — touche V */
+const FPS_EYE_Y = 0.7    // hauteur des yeux au-dessus du centre du corps
+const FPS_FWD = 0.25     // caméra légèrement devant le visage (le corps reste derrière)
+
+/* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
+const BUILD_TAG = 'build : vagues-fixes + FPS (V)'
+
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
 const PUSH_THRESHOLD = 5        // nombre de zombies pour déclencher
@@ -307,10 +314,18 @@ function useKeyboard() {
 /* ---------------------------------------------------------------- */
 /* Caméra                                                            */
 /* ---------------------------------------------------------------- */
-function FollowCamera({ target }) {
+function FollowCamera({ target, aimRef, modeRef }) {
   const { camera } = useThree()
   useFrame(() => {
     const p = target.current
+    if (modeRef && modeRef.current === 'fps') {
+      const y = aimRef ? aimRef.current : 0
+      const fx = Math.sin(y), fz = Math.cos(y)
+      const eyeY = p.y + FPS_EYE_Y
+      camera.position.set(p.x + fx * FPS_FWD, eyeY, p.z + fz * FPS_FWD)
+      camera.lookAt(p.x + fx * 10, eyeY, p.z + fz * 10)
+      return
+    }
     camTarget.set(p.x, p.y + 14, p.z + 11)
     camera.position.lerp(camTarget, 0.1)
     camera.lookAt(p.x, p.y + 0.5, p.z)
@@ -832,7 +847,7 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
   )
 }
 
-function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, uziAmmoRef, hasPistolRef, hasUziRef, hungerRef, onWeapon, onAmmo, onUziAmmo, playing }) {
+function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, uziAmmoRef, hasPistolRef, hasUziRef, hungerRef, onWeapon, onAmmo, onUziAmmo, playing, aimRef }) {
   const body = useRef()
   const visual = useRef()
   const keys = useKeyboard()
@@ -944,6 +959,7 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
       }
     }
     if (visual.current) visual.current.rotation.y = yaw.current
+    if (aimRef) aimRef.current = yaw.current
 
     // vitesse
     const vy = body.current.linvel().y
@@ -1388,8 +1404,19 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const groanTimer = useRef(0)
   const nextGroan = useRef(3)
 
+  // Vue : 'tps' (défaut) ou 'fps' (test, touche V) + yaw partagé pour la caméra
+  const aimYaw = useRef(0)
+  const viewMode = useRef('tps')
+
   useEffect(() => { countRef.current = zombies.filter((z) => !z.dying).length }, [zombies])
   useEffect(() => { if (playing) Sfx.waveStart() }, [])
+
+  // bascule vue subjective avec la touche V
+  useEffect(() => {
+    const onKey = (e) => { if (e.code === 'KeyV') viewMode.current = viewMode.current === 'fps' ? 'tps' : 'fps' }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // coup fatal : on marque "mourant" (le corps joue sa mort), score compté tout de suite
   const killZombies = useCallback((ids) => {
@@ -1571,7 +1598,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
 
   return (
     <>
-      <FollowCamera target={playerPos} />
+      <FollowCamera target={playerPos} aimRef={aimYaw} modeRef={viewMode} />
       <Lights />
       <Arena />
       <BenchRow />
@@ -1593,6 +1620,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         onAmmo={onAmmo}
         onUziAmmo={onUziAmmo}
         playing={playing}
+        aimRef={aimYaw}
       />
       {zombies.map((z) => (
         <Zombie
@@ -1897,6 +1925,9 @@ export default function App() {
       />
       {gameState === 'menu' && <StartScreen onPlay={startGame} />}
       {gameState === 'gameover' && <GameOver score={score} onRestart={startGame} onMenu={gotoMenu} />}
+      <div style={{ position: 'fixed', left: 8, bottom: 6, fontFamily: 'monospace', fontSize: 11, color: 'rgba(255,255,255,0.4)', pointerEvents: 'none', userSelect: 'none' }}>
+        {BUILD_TAG}
+      </div>
     </div>
   )
 }
