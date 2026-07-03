@@ -132,7 +132,7 @@ const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif,
 const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : P3 supermarché'
+const BUILD_TAG = 'build : P4 parcours complet'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -158,13 +158,15 @@ const SEARCH_RANGE = 2.7
 const SEARCH_TIME = 1.2
 const SHELF_USES = 1            // fouilles possibles par boutique avant épuisement (pénurie)
 
-/* Objectif de mission (Palier 2) : objets de recherche à récupérer.
-   Un objet par zone non finale ; le trouver ouvre la porte de la zone. */
-const QUEST_ITEMS = [
-  { id: 'dynamite', label: 'Caisse de dynamite', emoji: '🧨' },
-  { id: 'meds', label: 'Grosse boîte de médicaments', emoji: '💊' },
-]
-const objectiveDone = (c) => QUEST_ITEMS.every((q) => c[q.id])
+/* Objectif de mission (Palier 4) : objets de recherche cachés dans les gondoles des supermarchés.
+   Les galeries, elles, contiennent une CLÉ au sol qui ouvre leur porte. */
+const QUEST_ITEMS = {
+  dynamite: { id: 'dynamite', label: 'Caisse de dynamite', emoji: '🧨' },
+  meds: { id: 'meds', label: 'Grosse boîte de médicaments', emoji: '💊' },
+}
+const QUEST_ORDER = ['dynamite', 'meds']
+const objectiveDone = (c) => QUEST_ORDER.every((id) => c[id])
+const KEY_PICKUP_RANGE = 1.7   // distance de ramassage de la clé (galerie)
 
 /* Galerie marchande : couloir central, devantures de chaque côté */
 const CORRIDOR_HW = 6            // demi-largeur du couloir jouable (x ∈ [-6, 6])
@@ -177,11 +179,14 @@ const DOOR_W = 1.8               // largeur de la porte vitrée
 const SIGN_W = 3.8               // largeur de l'enseigne (ratio 4:1 -> hauteur SIGN_W/4)
 
 /* Zones du supermarché : traversée successive, une seule active à la fois.
-   type: 'galerie' (couloir + devantures) ou 'supermarche' (espace ouvert + gondoles) */
+   type: 'galerie' (couloir + devantures, on y trouve une CLÉ au sol)
+   ou 'supermarche' (espace ouvert + gondoles, on y trouve un OBJET DE MISSION) */
 const ZONES = [
   { name: "Galerie d'entrée", type: 'galerie' },
-  { name: 'Supermarché', type: 'supermarche' },
-  { name: 'Réserve & quais', type: 'galerie', exit: true },   // dernière zone : contient la SORTIE
+  { name: 'Supermarché 1', type: 'supermarche', quest: 'dynamite' },
+  { name: 'Galerie 2', type: 'galerie' },
+  { name: 'Supermarché 2', type: 'supermarche', quest: 'meds' },
+  { name: 'Galerie de sortie', type: 'galerie', exit: true },   // dernière zone : la SORTIE
 ]
 const DOOR_TRIGGER_HW = 2.2      // demi-largeur de la porte du fond (zone de passage)
 
@@ -211,9 +216,10 @@ function buildStorefronts(zoneIdx) {
       arr.push({ x: side * CORRIDOR_HW, z, side, type: SHOP_TYPES[Math.floor(Math.random() * SHOP_TYPES.length)] })
     }
   }
-  // objet de quête caché dans un point de fouille au hasard (zones non finales)
-  const quest = !zone.exit ? QUEST_ITEMS[zoneIdx] : null
-  if (quest && arr.length) arr[Math.floor(Math.random() * arr.length)].quest = quest
+  // objet de mission caché dans une gondole (supermarché uniquement ; les galeries ont une clé au sol)
+  if (zone.type === 'supermarche' && zone.quest && arr.length) {
+    arr[Math.floor(Math.random() * arr.length)].quest = QUEST_ITEMS[zone.quest]
+  }
   return arr
 }
 
@@ -417,8 +423,8 @@ function Lights() {
 }
 
 function Arena() {
-  const FLOOR_W = CORRIDOR_HW * 2 + 4    // sol limité au couloir (vide sombre autour)
-  const FLOOR_L = CORRIDOR_HL * 2 + 4
+  const FLOOR_W = CORRIDOR_HW * 2 + 1    // sol dallé arrêté au bord des murs (vide sombre au-delà)
+  const FLOOR_L = CORRIDOR_HL * 2 + 1
   const tileTex = useMemo(() => {
     const TILE_M = 0.65                 // côté du carreau (mètres)
     const px = 256
@@ -572,6 +578,25 @@ function GondolaModel({ w, d }) {
           <primitive object={clones[k]} />
         </group>
       ))}
+    </group>
+  )
+}
+
+/* Clé à ramasser au sol (galeries) : brille, tourne, se prend en s'approchant */
+function KeyPickup({ pos }) {
+  const g = useRef()
+  useFrame((s) => {
+    if (!g.current) return
+    g.current.rotation.y = s.clock.elapsedTime * 2
+    g.current.position.y = 1.0 + Math.sin(s.clock.elapsedTime * 3) * 0.12
+  })
+  const mat = <meshStandardMaterial color="#fde047" emissive="#f59e0b" emissiveIntensity={1.5} metalness={0.6} roughness={0.3} toneMapped={false} />
+  return (
+    <group ref={g} position={[pos.x, 1.0, pos.z]}>
+      <mesh><torusGeometry args={[0.16, 0.05, 8, 20]} />{mat}</mesh>
+      <mesh position={[0, -0.28, 0]}><boxGeometry args={[0.06, 0.34, 0.06]} />{mat}</mesh>
+      <mesh position={[0.09, -0.42, 0]}><boxGeometry args={[0.14, 0.06, 0.06]} />{mat}</mesh>
+      <pointLight color="#f59e0b" intensity={2} distance={3.5} />
     </group>
   )
 }
@@ -1537,6 +1562,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const [zoneIndex, setZoneIndex] = useState(0)
   const storefronts = useMemo(() => buildStorefronts(zoneIndex), [zoneIndex])
   const storefrontsRef = useRef(storefronts)
+  // clé cachée au sol dans les galeries non finales (position aléatoire)
+  const zoneKey = useMemo(() => {
+    const zone = ZONES[zoneIndex]
+    if (!zone || zone.type !== 'galerie' || zone.exit) return null
+    const x = (Math.random() * 2 - 1) * (CORRIDOR_HW - 1.6)
+    const z = -CORRIDOR_HL + 5 + Math.random() * (CORRIDOR_HL * 2 - 12)
+    return { x, z }
+  }, [zoneIndex])
   const shelfStates = useRef(storefronts.map(() => ({ available: true, uses: SHELF_USES })))
   const [doorOpen, setDoorOpen] = useState(false)
   const doorOpenRef = useRef(false)
@@ -1716,6 +1749,15 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         else advanceZone()
       }
 
+      /* Clé au sol (galerie) : ramassée en s'approchant -> ouvre la porte */
+      if (zoneKey && !doorOpenRef.current) {
+        if (Math.hypot(px - zoneKey.x, pz - zoneKey.z) < KEY_PICKUP_RANGE) {
+          setDoorOpen(true)
+          Sfx.pickup('pistol')
+          onPickup("🔑 Clé trouvée — la porte du fond s'ouvre !")
+        }
+      }
+
       /* Fouille du point le plus proche (devanture ou gondole) */
       const fronts = storefrontsRef.current
       let target = -1, best = Infinity
@@ -1767,8 +1809,12 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           wave: w, phase: 'active', banner, countdown, remaining: countRef.current,
           zone: zoneIndex, zoneName: ZONES[zoneIndex].name, zoneCount: ZONES.length,
           doorOpen: doorOpenRef.current, isExit: !!ZONES[zoneIndex].exit,
-          quest: QUEST_ITEMS.map((q) => ({ label: q.label, emoji: q.emoji, done: !!collectedRef.current[q.id] })),
-          zoneQuest: (ZONES[zoneIndex].exit || !QUEST_ITEMS[zoneIndex]) ? null : QUEST_ITEMS[zoneIndex].label,
+          quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: !!collectedRef.current[id] })),
+          doorHint: zoneDef.exit
+            ? 'réunissez les objets de mission'
+            : zoneDef.type === 'galerie'
+              ? 'trouvez la CLÉ (cachée dans la galerie)'
+              : `trouvez ${QUEST_ITEMS[zoneDef.quest] ? QUEST_ITEMS[zoneDef.quest].label : "l'objet"} (fouillez les gondoles)`,
           objDone: objectiveDone(collectedRef.current),
         })
       }
@@ -1800,6 +1846,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         <>
           <BenchRow />
           <Storefronts storefronts={storefronts} />
+          {zoneKey && !doorOpen && <KeyPickup pos={zoneKey} />}
         </>
       )}
       <ZoneDoor open={doorOpen} isExit={!!ZONES[zoneIndex].exit} />
@@ -1874,7 +1921,7 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, zoneQuest, objDone, playing, muted, onToggleMute }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, doorHint, objDone, playing, muted, onToggleMute }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
       <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
@@ -1902,9 +1949,9 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
             </div>
           )}
           <div style={{ fontSize: 12, marginTop: 2, fontWeight: 600, color: doorOpen ? '#22c55e' : '#f87171' }}>
-            {isExit
-              ? (doorOpen ? '🚪 SORTIE ouverte — foncez au fond !' : '🔒 SORTIE verrouillée')
-              : (doorOpen ? '🔓 Porte ouverte — foncez au fond !' : `🔒 Objectif : trouvez ${zoneQuest || 'l\'objet de mission'} (fouillez les rayons)`)}
+            {doorOpen
+              ? (isExit ? '🚪 SORTIE ouverte — foncez au fond !' : '🔓 Porte ouverte — foncez au fond !')
+              : '🔒 ' + (isExit ? 'SORTIE verrouillée — ' : 'Objectif : ') + (doorHint || '')}
           </div>
         </div>
       )}
@@ -2063,7 +2110,7 @@ export default function App() {
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
   const [uziAmmo, setUziAmmo] = useState(0)
   const [hasUzi, setHasUzi] = useState(false)
-  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ITEMS.map((q) => ({ label: q.label, emoji: q.emoji, done: false })), zoneQuest: QUEST_ITEMS[0] ? QUEST_ITEMS[0].label : null, objDone: false })
+  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', objDone: false })
   const [toast, setToast] = useState(null)
   const [muted, setMuted] = useState(false)
   const [gameKey, setGameKey] = useState(0)
@@ -2102,7 +2149,7 @@ export default function App() {
     setHasPistol(START_HAS_PISTOL)
     setUziAmmo(0)
     setHasUzi(false)
-    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ITEMS.map((q) => ({ label: q.label, emoji: q.emoji, done: false })), zoneQuest: QUEST_ITEMS[0] ? QUEST_ITEMS[0].label : null, objDone: false })
+    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', objDone: false })
     setToast(null)
     setGameKey((k) => k + 1)
   }
@@ -2156,7 +2203,7 @@ export default function App() {
         doorOpen={survival.doorOpen}
         isExit={survival.isExit}
         quest={survival.quest}
-        zoneQuest={survival.zoneQuest}
+        doorHint={survival.doorHint}
         objDone={survival.objDone}
         playing={gameState === 'playing'}
         muted={muted}
