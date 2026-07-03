@@ -132,7 +132,7 @@ const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif,
 const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : vagues-salve-temps'
+const BUILD_TAG = 'build : zones P1'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -167,13 +167,32 @@ const STORE_SLOTS = [-18, -12, -6, 0, 6, 12, 18]   // centres z des devantures
 const STORE_W = 5.4              // largeur d'une devanture (le long de z)
 const DOOR_W = 1.8               // largeur de la porte vitrée
 const SIGN_W = 3.8               // largeur de l'enseigne (ratio 4:1 -> hauteur SIGN_W/4)
-const STOREFRONTS = []
-for (const side of [-1, 1]) for (const z of STORE_SLOTS) {
-  STOREFRONTS.push({ x: side * CORRIDOR_HW, z, side, type: SHOP_TYPES[Math.floor(Math.random() * SHOP_TYPES.length)] })
+
+/* Zones du supermarché (Palier 1) : traversée successive, une seule active à la fois */
+const ZONES = [
+  { name: "Galerie d'entrée" },
+  { name: 'Rayons alimentaires' },
+  { name: 'Réserve & quais', exit: true },   // dernière zone : contient la SORTIE
+]
+const DOOR_TRIGGER_HW = 2.2      // demi-largeur de la porte du fond (zone de passage)
+
+function buildStorefronts(zoneIdx) {
+  const arr = []
+  for (const side of [-1, 1]) for (const z of STORE_SLOTS) {
+    arr.push({ x: side * CORRIDOR_HW, z, side, type: SHOP_TYPES[Math.floor(Math.random() * SHOP_TYPES.length)] })
+  }
+  // carte d'accès cachée dans une boutique au hasard (sauf zone finale)
+  if (!ZONES[zoneIdx] || !ZONES[zoneIdx].exit) {
+    arr[Math.floor(Math.random() * arr.length)].hasCard = true
+  }
+  return arr
 }
 
+const FOND_SEG_W = (CORRIDOR_HW + 1) - DOOR_TRIGGER_HW   // largeur d'un demi-mur du fond
+const FOND_SEG_X = DOOR_TRIGGER_HW + FOND_SEG_W / 2       // centre x de chaque demi-mur
 const WALLS = [
-  { x: 0, z: -CORRIDOR_HL, w: CORRIDOR_HW * 2 + 2, d: 1 },   // fond
+  { x: -FOND_SEG_X, z: -CORRIDOR_HL, w: FOND_SEG_W, d: 1 },  // fond gauche
+  { x: FOND_SEG_X, z: -CORRIDOR_HL, w: FOND_SEG_W, d: 1 },   // fond droit (ouverture au centre = porte)
   { x: 0, z: CORRIDOR_HL, w: CORRIDOR_HW * 2 + 2, d: 1 },    // entrée
   { x: -CORRIDOR_HW, z: 0, w: 1, d: CORRIDOR_HL * 2 + 2 },   // mur gauche
   { x: CORRIDOR_HW, z: 0, w: 1, d: CORRIDOR_HL * 2 + 2 },    // mur droit
@@ -562,10 +581,10 @@ function ShopSign({ type, width }) {
 }
 
 /* Devantures de magasins le long des deux murs du couloir */
-function Storefronts() {
+function Storefronts({ storefronts }) {
   return (
     <group>
-      {STOREFRONTS.map((s, i) => {
+      {storefronts.map((s, i) => {
         const faceX = s.x - s.side * 0.55          // face intérieure (vers le couloir)
         const ry = s.side > 0 ? -Math.PI / 2 : Math.PI / 2  // tourne la devanture vers le couloir
         return (
@@ -596,10 +615,10 @@ function Storefronts() {
   )
 }
 
-function LootIndicators({ indicatorsRef }) {
+function LootIndicators({ storefronts, indicatorsRef }) {
   return (
     <group>
-      {STOREFRONTS.map((s, i) => (
+      {storefronts.map((s, i) => (
         <mesh key={i} ref={(el) => (indicatorsRef.current[i] = el)} position={[s.x - s.side * 1.1, 1.5, s.z]}>
           <octahedronGeometry args={[0.28, 0]} />
           <meshStandardMaterial color="#fbbf24" emissive="#f59e0b" emissiveIntensity={1.4} />
@@ -609,9 +628,73 @@ function LootIndicators({ indicatorsRef }) {
   )
 }
 
-/* ---------------------------------------------------------------- */
-/* Balles                                                            */
-/* ---------------------------------------------------------------- */
+function makeDoorLabel(text, color) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 128
+  const g = c.getContext('2d')
+  g.clearRect(0, 0, 512, 128)
+  g.fillStyle = color; g.font = 'bold 84px Georgia, serif'; g.textAlign = 'center'; g.textBaseline = 'middle'
+  g.fillText(text, 256, 68)
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4
+  return t
+}
+/* Porte au fond du couloir : verrouillée (rouge) -> ouverte (verte). Collider présent seulement fermée. */
+function ZoneDoor({ open, isExit }) {
+  const panel = useRef()
+  const label = useMemo(
+    () => makeDoorLabel(isExit ? 'SORTIE' : 'ACCÈS', isExit ? '#22c55e' : '#38bdf8'),
+    [isExit],
+  )
+  const shown = open || isExit
+  useFrame((state, dt) => {
+    if (panel.current) {
+      const targetY = shown ? 3.7 : 1.25   // le battant se relève à l'ouverture
+      panel.current.position.y += (targetY - panel.current.position.y) * Math.min(1, dt * 4)
+    }
+  })
+  const barCol = shown ? '#22c55e' : '#dc2626'
+  return (
+    <group position={[0, 0, -CORRIDOR_HL + 0.4]}>
+      {/* montants latéraux (cadre) + leurs colliders */}
+      <RigidBody type="fixed" colliders={false}>
+        {[-1, 1].map((s) => (
+          <mesh key={s} position={[s * (DOOR_TRIGGER_HW + 0.15), WALL_H / 2, 0]} castShadow receiveShadow>
+            <boxGeometry args={[0.3, WALL_H, 0.5]} />
+            <meshStandardMaterial color="#1b2430" metalness={0.2} roughness={0.8} />
+          </mesh>
+        ))}
+        <mesh position={[0, WALL_H - 0.15, 0]}>
+          <boxGeometry args={[DOOR_TRIGGER_HW * 2 + 0.6, 0.3, 0.5]} />
+          <meshStandardMaterial color="#1b2430" />
+        </mesh>
+        <CuboidCollider args={[0.15, WALL_H / 2, 0.25]} position={[DOOR_TRIGGER_HW + 0.15, WALL_H / 2, 0]} />
+        <CuboidCollider args={[0.15, WALL_H / 2, 0.25]} position={[-(DOOR_TRIGGER_HW + 0.15), WALL_H / 2, 0]} />
+      </RigidBody>
+
+      {/* collider du battant : uniquement quand la porte est fermée */}
+      <RigidBody type="fixed" colliders={false}>
+        {!shown && <CuboidCollider args={[DOOR_TRIGGER_HW, 1.25, 0.12]} position={[0, 1.25, 0]} />}
+      </RigidBody>
+
+      {/* battant coulissant (visuel) */}
+      <mesh ref={panel} position={[0, shown ? 3.7 : 1.25, 0.05]} castShadow>
+        <boxGeometry args={[DOOR_TRIGGER_HW * 2, 2.5, 0.14]} />
+        <meshStandardMaterial color={isExit ? '#14532d' : '#334155'} metalness={0.4} roughness={0.5} />
+      </mesh>
+
+      {/* barre d'état + libellé */}
+      <mesh position={[0, WALL_H + 0.02, 0.28]}>
+        <boxGeometry args={[DOOR_TRIGGER_HW * 2, 0.16, 0.05]} />
+        <meshStandardMaterial color={barCol} emissive={barCol} emissiveIntensity={1.6} toneMapped={false} />
+      </mesh>
+      <mesh position={[0, WALL_H + 0.45, 0.28]}>
+        <planeGeometry args={[2.4, 0.6]} />
+        <meshBasicMaterial map={label} transparent toneMapped={false} />
+      </mesh>
+    </group>
+  )
+}
+
+
 /* Couleurs des traçantes (réutilisées chaque frame, sans réallocation) */
 const TRACER_COLORS = {
   uzi:    { core: new THREE.Color('#fff0c0'), glow: new THREE.Color('#ff3b1f') }, // orange -> rouge
@@ -857,7 +940,7 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
   )
 }
 
-function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, uziAmmoRef, hasPistolRef, hasUziRef, hungerRef, onWeapon, onAmmo, onUziAmmo, playing, aimRef }) {
+function Player({ posRef, bodyRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, uziAmmoRef, hasPistolRef, hasUziRef, hungerRef, onWeapon, onAmmo, onUziAmmo, playing, aimRef }) {
   const body = useRef()
   const visual = useRef()
   const keys = useKeyboard()
@@ -1043,9 +1126,9 @@ function Player({ posRef, registry, killZombies, bulletsRef, shelfRectsRef, ammo
 
   return (
     <RigidBody
-      ref={body}
+      ref={(el) => { body.current = el; if (bodyRef) bodyRef.current = el }}
       type="dynamic"
-      position={[0, 0.9, 0]}
+      position={[0, 0.9, CORRIDOR_HL - 2]}
       colliders={false}
       enabledRotations={[false, false, false]}
       mass={3}
@@ -1379,8 +1462,9 @@ function Zombie({ id, spawn, armored, fat, female, gait, speedMul, dying, posRef
 /* ---------------------------------------------------------------- */
 /* Logique de jeu (mémoïsée)                                         */
 /* ---------------------------------------------------------------- */
-const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, onAmmo, onUziAmmo, onPistol, onUzi, onSurvival, onPickup }) {
-  const playerPos = useRef(new THREE.Vector3(0, 0.9, 0))
+const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, onAmmo, onUziAmmo, onPistol, onUzi, onSurvival, onPickup, onWin }) {
+  const playerPos = useRef(new THREE.Vector3(0, 0.9, CORRIDOR_HL - 2))   // départ à l'entrée
+  const playerBody = useRef()
   const registry = useRef(new Map())
   const bulletsRef = useRef()
   const indicatorsRef = useRef([])
@@ -1404,7 +1488,18 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const uziAmmoRef = useRef(0)
   const hasPistolRef = useRef(START_HAS_PISTOL)
   const hasUziRef = useRef(false)
-  const shelfStates = useRef(STOREFRONTS.map(() => ({ available: true, cooldownUntil: 0 })))
+
+  // --- Zones (Palier 1) ---
+  const [zoneIndex, setZoneIndex] = useState(0)
+  const storefronts = useMemo(() => buildStorefronts(zoneIndex), [zoneIndex])
+  const storefrontsRef = useRef(storefronts)
+  const shelfStates = useRef(storefronts.map(() => ({ available: true, cooldownUntil: 0 })))
+  const [doorOpen, setDoorOpen] = useState(false)
+  const doorOpenRef = useRef(false)
+  const zoneBannerRef = useRef('')
+  const transitioningRef = useRef(false)
+  const firstZone = useRef(true)
+
   const searchProgress = useRef(0)
   const promptRef = useRef(false)
   const starveTimer = useRef(0)
@@ -1414,18 +1509,35 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const groanTimer = useRef(0)
   const nextGroan = useRef(3)
 
-  // Vue : 'tps' (défaut) ou 'fps' (test, touche V) + yaw partagé pour la caméra
   const aimYaw = useRef(0)
-  const viewMode = useRef('tps')
+  const viewMode = useRef('tps')   // vue de dessus (la bascule FPS de test a été retirée)
+  const pendingBanner = useRef(false)
 
   useEffect(() => { countRef.current = zombies.filter((z) => !z.dying).length }, [zombies])
   useEffect(() => { if (playing) Sfx.waveStart() }, [])
 
-  // bascule vue subjective avec la touche V
+  // refs synchronisées avec la zone active
+  useEffect(() => { storefrontsRef.current = storefronts }, [storefronts])
+  useEffect(() => { doorOpenRef.current = doorOpen }, [doorOpen])
+
+  // changement de zone : reset vagues + boutiques + porte, téléport à l'entrée, bannière
   useEffect(() => {
-    const onKey = (e) => { if (e.code === 'KeyV') viewMode.current = viewMode.current === 'fps' ? 'tps' : 'fps' }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    shelfStates.current = storefronts.map(() => ({ available: true, cooldownUntil: 0 }))
+    setDoorOpen(!!ZONES[zoneIndex].exit)   // zone finale : la sortie est déjà ouverte
+    transitioningRef.current = false
+    if (firstZone.current) { firstZone.current = false; return }
+    setZombies([]); registry.current.clear(); countRef.current = 0
+    waveRef.current = 1; waveTimer.current = 0; spawnedThisWave.current = 0; spawnTimer.current = 0
+    searchProgress.current = 0
+    playerBody.current?.setTranslation({ x: 0, y: 0.9, z: CORRIDOR_HL - 2 }, true)
+    playerBody.current?.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    zoneBannerRef.current = ZONES[zoneIndex].name.toUpperCase()
+    pendingBanner.current = true
+    Sfx.waveStart()
+  }, [zoneIndex, storefronts])
+
+  const advanceZone = useCallback(() => {
+    setZoneIndex((zi) => Math.min(ZONES.length - 1, zi + 1))
   }, [])
 
   // coup fatal : on marque "mourant" (le corps joue sa mort), score compté tout de suite
@@ -1482,6 +1594,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
 
   useFrame((state, dt) => {
     const now = state.clock.elapsedTime
+    if (pendingBanner.current) { bannerUntil.current = now + BANNER_DURATION; pendingBanner.current = false }
 
     if (playing) {
       /* --- Vagues : toute la salve arrive groupée, vague suivante au nettoyage --- */
@@ -1518,6 +1631,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         waveRef.current += 1
         spawnedThisWave.current = 0
         spawnTimer.current = 0
+        zoneBannerRef.current = ''   // les vagues suivantes affichent "VAGUE N"
         bannerUntil.current = now + BANNER_DURATION
         Sfx.waveStart()
       }
@@ -1545,6 +1659,15 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       prevX.current = px
       prevZ.current = pz
 
+      /* Porte du fond : franchissement (sortie -> victoire, sinon -> zone suivante) */
+      const zoneDef = ZONES[zoneIndex]
+      const atDoor = pz < -CORRIDOR_HL + 1.6 && Math.abs(px) < DOOR_TRIGGER_HW
+      if (atDoor && !transitioningRef.current && (zoneDef.exit || doorOpenRef.current)) {
+        transitioningRef.current = true
+        if (zoneDef.exit) onWin()
+        else advanceZone()
+      }
+
       /* Réapprovisionnement des devantures */
       for (let i = 0; i < shelfStates.current.length; i++) {
         const st = shelfStates.current[i]
@@ -1552,10 +1675,11 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       }
 
       /* Fouille de la devanture la plus proche (porte) */
+      const fronts = storefrontsRef.current
       let target = -1, best = Infinity
-      for (let i = 0; i < STOREFRONTS.length; i++) {
-        if (!shelfStates.current[i].available) continue
-        const s = STOREFRONTS[i]
+      for (let i = 0; i < fronts.length; i++) {
+        if (!shelfStates.current[i] || !shelfStates.current[i].available) continue
+        const s = fronts[i]
         const doorX = s.x - s.side * 0.6
         const d = distToRect(px, pz, doorX, s.z, 0.9, 0.4)
         if (d < SEARCH_RANGE && d < best) { best = d; target = i }
@@ -1570,7 +1694,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       if (target !== -1 && (keys.current['KeyE'] || padSearch) && moveSpeed < 1.0) {
         searchProgress.current += dt / SEARCH_TIME
         if (searchProgress.current >= 1) {
-          grantLoot(STOREFRONTS[target].type)
+          const s = fronts[target]
+          grantLoot(s.type)
+          if (s.hasCard) {                       // carte d'accès -> ouvre la porte du fond
+            s.hasCard = false
+            setDoorOpen(true)
+            Sfx.pickup('pistol')
+            onPickup("🔑 Carte d'accès trouvée — la porte du fond s'ouvre !")
+          }
           const st = shelfStates.current[target]
           st.available = false
           st.cooldownUntil = now + SHELF_COOLDOWN
@@ -1583,13 +1714,15 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       if (now - lastPush.current > 0.05) {
         lastPush.current = now
         const w = waveRef.current
-        const banner = now < bannerUntil.current ? 'VAGUE ' + w : null
+        const banner = now < bannerUntil.current ? (zoneBannerRef.current || ('VAGUE ' + w)) : null
         const countdown = Math.max(0, Math.ceil(waveDuration(w) - waveTimer.current))
         onSurvival({
           hunger: hungerRef.current,
           search: searchProgress.current,
           prompt: promptRef.current,
           wave: w, phase: 'active', banner, countdown, remaining: countRef.current,
+          zone: zoneIndex, zoneName: ZONES[zoneIndex].name, zoneCount: ZONES.length,
+          doorOpen: doorOpenRef.current, isExit: !!ZONES[zoneIndex].exit,
         })
       }
     }
@@ -1597,8 +1730,8 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     /* Indicateurs de butin (devant les portes disponibles) */
     for (let i = 0; i < indicatorsRef.current.length; i++) {
       const ind = indicatorsRef.current[i]
-      const s = STOREFRONTS[i]
-      if (!ind || !s) continue
+      const s = storefrontsRef.current[i]
+      if (!ind || !s || !shelfStates.current[i]) continue
       const avail = shelfStates.current[i].available
       ind.visible = avail
       if (avail) {
@@ -1614,11 +1747,13 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       <Lights />
       <Arena />
       <BenchRow />
-      <Storefronts />
-      <LootIndicators indicatorsRef={indicatorsRef} />
+      <Storefronts storefronts={storefronts} />
+      <ZoneDoor open={doorOpen} isExit={!!ZONES[zoneIndex].exit} />
+      <LootIndicators storefronts={storefronts} indicatorsRef={indicatorsRef} />
       <Bullets ref={bulletsRef} registry={registry} killZombies={killZombies} shelfRectsRef={shelfRects} playing={playing} />
       <Player
         posRef={playerPos}
+        bodyRef={playerBody}
         registry={registry}
         killZombies={killZombies}
         bulletsRef={bulletsRef}
@@ -1685,7 +1820,7 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, playing, muted, onToggleMute }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, playing, muted, onToggleMute }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
       <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
@@ -1695,7 +1830,7 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
         <Gauge label="FAIM" value={hunger} color={hunger > 50 ? '#f59e0b' : hunger > 20 ? '#fb923c' : '#ef4444'} />
       </div>
 
-      {/* Indicateur de vague (haut-centre) */}
+      {/* Indicateur de vague + zone (haut-centre) */}
       {playing && (
         <div style={{ position: 'absolute', top: 18, left: '50%', transform: 'translateX(-50%)', textAlign: 'center' }}>
           <div style={{ fontSize: 13, letterSpacing: 4, fontWeight: 700, color: '#fbbf24' }}>VAGUE {wave}</div>
@@ -1704,6 +1839,12 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
               {remaining} zombie{remaining > 1 ? 's' : ''} · vague {wave + 1} dans {countdown}s
             </div>
           )}
+          <div style={{ fontSize: 12, letterSpacing: 2, marginTop: 6, color: '#93c5fd' }}>
+            ZONE {(zone ?? 0) + 1}/{zoneCount} · {zoneName}
+          </div>
+          <div style={{ fontSize: 12, marginTop: 2, fontWeight: 600, color: isExit || doorOpen ? '#22c55e' : '#f87171' }}>
+            {isExit ? '🚪 SORTIE au fond du couloir' : doorOpen ? '🔓 Porte ouverte — foncez au fond !' : "🔒 Trouvez la carte d'accès (fouillez les boutiques)"}
+          </div>
         </div>
       )}
 
@@ -1831,6 +1972,24 @@ function GameOver({ score, onRestart, onMenu }) {
   )
 }
 
+function WinScreen({ score, onRestart, onMenu }) {
+  return (
+    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18, background: '#02140aee', color: '#fff', fontFamily: 'system-ui' }}>
+      <div style={{ fontSize: 54, fontWeight: 800, letterSpacing: 2, color: '#22c55e' }}>ÉVASION RÉUSSIE !</div>
+      <div style={{ fontSize: 20, opacity: 0.9 }}>Vous avez trouvé la sortie du supermarché.</div>
+      <div style={{ fontSize: 20, opacity: 0.85 }}>Zombies abattus : <b>{score}</b></div>
+      <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
+        <button onClick={onRestart} style={{ padding: '12px 28px', fontSize: 16, fontWeight: 700, color: '#052e16', background: '#22c55e', border: 'none', borderRadius: 10, cursor: 'pointer' }}>
+          REJOUER
+        </button>
+        <button onClick={onMenu} style={{ padding: '12px 28px', fontSize: 16, fontWeight: 700, color: '#f3ead7', background: '#ffffff14', border: '1px solid #ffffff22', borderRadius: 10, cursor: 'pointer' }}>
+          MENU
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /* ---------------------------------------------------------------- */
 /* App                                                               */
 /* ---------------------------------------------------------------- */
@@ -1843,7 +2002,7 @@ export default function App() {
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
   const [uziAmmo, setUziAmmo] = useState(0)
   const [hasUzi, setHasUzi] = useState(false)
-  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0 })
+  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false })
   const [toast, setToast] = useState(null)
   const [muted, setMuted] = useState(false)
   const [gameKey, setGameKey] = useState(0)
@@ -1864,6 +2023,7 @@ export default function App() {
   const handleUziAmmo = useCallback((n) => setUziAmmo(n), [])
   const handleUzi = useCallback((v) => setHasUzi(v), [])
   const handleSurvival = useCallback((s) => setSurvival(s), [])
+  const handleWin = useCallback(() => setGameState('win'), [])
   const handlePickup = useCallback((text) => {
     setToast(text)
     if (toastTimer.current) clearTimeout(toastTimer.current)
@@ -1881,7 +2041,7 @@ export default function App() {
     setHasPistol(START_HAS_PISTOL)
     setUziAmmo(0)
     setHasUzi(false)
-    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0 })
+    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false })
     setToast(null)
     setGameKey((k) => k + 1)
   }
@@ -1908,6 +2068,7 @@ export default function App() {
               onUzi={handleUzi}
               onSurvival={handleSurvival}
               onPickup={handlePickup}
+              onWin={handleWin}
             />
           </Suspense>
         </Physics>
@@ -1928,12 +2089,18 @@ export default function App() {
         banner={survival.banner}
         countdown={survival.countdown}
         remaining={survival.remaining}
+        zoneName={survival.zoneName}
+        zone={survival.zone}
+        zoneCount={survival.zoneCount}
+        doorOpen={survival.doorOpen}
+        isExit={survival.isExit}
         playing={gameState === 'playing'}
         muted={muted}
         onToggleMute={toggleMute}
       />
       {gameState === 'menu' && <StartScreen onPlay={startGame} />}
       {gameState === 'gameover' && <GameOver score={score} onRestart={startGame} onMenu={gotoMenu} />}
+      {gameState === 'win' && <WinScreen score={score} onRestart={startGame} onMenu={gotoMenu} />}
       <div style={{ position: 'fixed', left: 8, bottom: 6, fontFamily: 'monospace', fontSize: 11, color: 'rgba(255,255,255,0.4)', pointerEvents: 'none', userSelect: 'none' }}>
         {BUILD_TAG}
       </div>
