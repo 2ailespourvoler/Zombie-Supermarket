@@ -132,7 +132,7 @@ const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif,
 const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : P2 liste + pénurie'
+const BUILD_TAG = 'build : P2 mission (objets)'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -158,10 +158,13 @@ const SEARCH_RANGE = 2.7
 const SEARCH_TIME = 1.2
 const SHELF_USES = 1            // fouilles possibles par boutique avant épuisement (pénurie)
 
-/* Objectif (Palier 2) : liste de courses à réunir avant d'ouvrir la sortie */
-const OBJECTIVE = { arme: 1, nourriture: 3, medicament: 2 }
-const SHOP_CATEGORY = { armurerie: 'arme', pharmacie: 'medicament', epicerie: 'nourriture', boulangerie: 'nourriture' }
-const objectiveDone = (c) => c.arme >= OBJECTIVE.arme && c.nourriture >= OBJECTIVE.nourriture && c.medicament >= OBJECTIVE.medicament
+/* Objectif de mission (Palier 2) : objets de recherche à récupérer.
+   Un objet par zone non finale ; le trouver ouvre la porte de la zone. */
+const QUEST_ITEMS = [
+  { id: 'dynamite', label: 'Caisse de dynamite', emoji: '🧨' },
+  { id: 'meds', label: 'Grosse boîte de médicaments', emoji: '💊' },
+]
+const objectiveDone = (c) => QUEST_ITEMS.every((q) => c[q.id])
 
 /* Galerie marchande : couloir central, devantures de chaque côté */
 const CORRIDOR_HW = 6            // demi-largeur du couloir jouable (x ∈ [-6, 6])
@@ -186,10 +189,9 @@ function buildStorefronts(zoneIdx) {
   for (const side of [-1, 1]) for (const z of STORE_SLOTS) {
     arr.push({ x: side * CORRIDOR_HW, z, side, type: SHOP_TYPES[Math.floor(Math.random() * SHOP_TYPES.length)] })
   }
-  // carte d'accès cachée dans une boutique au hasard (sauf zone finale)
-  if (!ZONES[zoneIdx] || !ZONES[zoneIdx].exit) {
-    arr[Math.floor(Math.random() * arr.length)].hasCard = true
-  }
+  // objet de quête caché dans une boutique au hasard (zones non finales)
+  const quest = (ZONES[zoneIdx] && !ZONES[zoneIdx].exit) ? QUEST_ITEMS[zoneIdx] : null
+  if (quest) arr[Math.floor(Math.random() * arr.length)].quest = quest
   return arr
 }
 
@@ -1506,8 +1508,8 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const transitioningRef = useRef(false)
   const firstZone = useRef(true)
 
-  // --- Objectif liste de courses (Palier 2) ---
-  const collectedRef = useRef({ arme: 0, nourriture: 0, medicament: 0 })
+  // --- Objectif mission (Palier 2) : objets de quête récupérés ---
+  const collectedRef = useRef({})
 
   const searchProgress = useRef(0)
   const promptRef = useRef(false)
@@ -1700,19 +1702,11 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         if (searchProgress.current >= 1) {
           const s = fronts[target]
           grantLoot(s.type)
-          // objectif : on comptabilise le produit selon la catégorie de la boutique
-          const cat = SHOP_CATEGORY[s.type]
-          if (cat && collectedRef.current[cat] < OBJECTIVE[cat]) collectedRef.current[cat] += 1
-          if (s.hasCard) {                       // carte d'accès -> ouvre la porte du fond
-            s.hasCard = false
+          if (s.quest) {                          // objet de mission -> collecté + ouvre la porte de la zone
+            collectedRef.current[s.quest.id] = true
             setDoorOpen(true)
             Sfx.pickup('pistol')
-            onPickup("🔑 Carte d'accès trouvée — la porte du fond s'ouvre !")
-          }
-          // zone finale : la SORTIE s'ouvre dès que la liste est complète
-          if (zoneDef.exit && objectiveDone(collectedRef.current)) {
-            if (!doorOpenRef.current) onPickup('✅ Liste complète — la SORTIE est ouverte !')
-            setDoorOpen(true)
+            onPickup(s.quest.emoji + ' ' + s.quest.label + ' récupérée — la porte du fond s\'ouvre !')
           }
           const st = shelfStates.current[target]
           st.uses -= 1
@@ -1735,7 +1729,9 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           wave: w, phase: 'active', banner, countdown, remaining: countRef.current,
           zone: zoneIndex, zoneName: ZONES[zoneIndex].name, zoneCount: ZONES.length,
           doorOpen: doorOpenRef.current, isExit: !!ZONES[zoneIndex].exit,
-          obj: { ...collectedRef.current }, objTarget: OBJECTIVE, objDone: objectiveDone(collectedRef.current),
+          quest: QUEST_ITEMS.map((q) => ({ label: q.label, emoji: q.emoji, done: !!collectedRef.current[q.id] })),
+          zoneQuest: (ZONES[zoneIndex].exit || !QUEST_ITEMS[zoneIndex]) ? null : QUEST_ITEMS[zoneIndex].label,
+          objDone: objectiveDone(collectedRef.current),
         })
       }
     }
@@ -1833,7 +1829,7 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, obj, objTarget, objDone, playing, muted, onToggleMute }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, zoneQuest, objDone, playing, muted, onToggleMute }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
       <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
@@ -1855,15 +1851,15 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
           <div style={{ fontSize: 12, letterSpacing: 2, marginTop: 6, color: '#93c5fd' }}>
             ZONE {(zone ?? 0) + 1}/{zoneCount} · {zoneName}
           </div>
-          {obj && objTarget && (
+          {quest && quest.length > 0 && (
             <div style={{ fontSize: 12, marginTop: 3, fontWeight: 600, color: objDone ? '#22c55e' : '#e5e7eb' }}>
-              🎯 Armes {Math.min(obj.arme, objTarget.arme)}/{objTarget.arme} · Nourriture {Math.min(obj.nourriture, objTarget.nourriture)}/{objTarget.nourriture} · Médoc {Math.min(obj.medicament, objTarget.medicament)}/{objTarget.medicament}
+              🎯 {quest.map((q) => `${q.done ? '✅' : '⬜'} ${q.emoji} ${q.label}`).join('   ')}
             </div>
           )}
           <div style={{ fontSize: 12, marginTop: 2, fontWeight: 600, color: doorOpen ? '#22c55e' : '#f87171' }}>
             {isExit
-              ? (doorOpen ? '🚪 SORTIE ouverte — foncez au fond !' : '🔒 SORTIE verrouillée — complétez la liste')
-              : (doorOpen ? '🔓 Porte ouverte — foncez au fond !' : "🔒 Trouvez la carte d'accès (fouillez les boutiques)")}
+              ? (doorOpen ? '🚪 SORTIE ouverte — foncez au fond !' : '🔒 SORTIE verrouillée')
+              : (doorOpen ? '🔓 Porte ouverte — foncez au fond !' : `🔒 Objectif : trouvez ${zoneQuest || 'l\'objet de mission'} (fouillez les boutiques)`)}
           </div>
         </div>
       )}
@@ -2022,7 +2018,7 @@ export default function App() {
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
   const [uziAmmo, setUziAmmo] = useState(0)
   const [hasUzi, setHasUzi] = useState(false)
-  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, obj: { arme: 0, nourriture: 0, medicament: 0 }, objTarget: OBJECTIVE, objDone: false })
+  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ITEMS.map((q) => ({ label: q.label, emoji: q.emoji, done: false })), zoneQuest: QUEST_ITEMS[0] ? QUEST_ITEMS[0].label : null, objDone: false })
   const [toast, setToast] = useState(null)
   const [muted, setMuted] = useState(false)
   const [gameKey, setGameKey] = useState(0)
@@ -2061,7 +2057,7 @@ export default function App() {
     setHasPistol(START_HAS_PISTOL)
     setUziAmmo(0)
     setHasUzi(false)
-    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, obj: { arme: 0, nourriture: 0, medicament: 0 }, objTarget: OBJECTIVE, objDone: false })
+    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ITEMS.map((q) => ({ label: q.label, emoji: q.emoji, done: false })), zoneQuest: QUEST_ITEMS[0] ? QUEST_ITEMS[0].label : null, objDone: false })
     setToast(null)
     setGameKey((k) => k + 1)
   }
@@ -2114,8 +2110,8 @@ export default function App() {
         zoneCount={survival.zoneCount}
         doorOpen={survival.doorOpen}
         isExit={survival.isExit}
-        obj={survival.obj}
-        objTarget={survival.objTarget}
+        quest={survival.quest}
+        zoneQuest={survival.zoneQuest}
         objDone={survival.objDone}
         playing={gameState === 'playing'}
         muted={muted}
