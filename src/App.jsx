@@ -132,7 +132,7 @@ const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif,
 const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : P2 mission (objets)'
+const BUILD_TAG = 'build : P3 supermarché'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -176,22 +176,44 @@ const STORE_W = 5.4              // largeur d'une devanture (le long de z)
 const DOOR_W = 1.8               // largeur de la porte vitrée
 const SIGN_W = 3.8               // largeur de l'enseigne (ratio 4:1 -> hauteur SIGN_W/4)
 
-/* Zones du supermarché (Palier 1) : traversée successive, une seule active à la fois */
+/* Zones du supermarché : traversée successive, une seule active à la fois.
+   type: 'galerie' (couloir + devantures) ou 'supermarche' (espace ouvert + gondoles) */
 const ZONES = [
-  { name: "Galerie d'entrée" },
-  { name: 'Rayons alimentaires' },
-  { name: 'Réserve & quais', exit: true },   // dernière zone : contient la SORTIE
+  { name: "Galerie d'entrée", type: 'galerie' },
+  { name: 'Supermarché', type: 'supermarche' },
+  { name: 'Réserve & quais', type: 'galerie', exit: true },   // dernière zone : contient la SORTIE
 ]
 const DOOR_TRIGGER_HW = 2.2      // demi-largeur de la porte du fond (zone de passage)
 
+/* Disposition des îlots de gondoles dans une zone "supermarché" */
+const MARKET_BLOCK_W = 2.6       // largeur d'un îlot (X)
+const MARKET_BLOCK_D = 1.3       // profondeur d'un îlot (Z)
+const MARKET_BLOCKS = [
+  { x: -3.6, z: -13 }, { x: 3.6, z: -13 },
+  { x: -3.6, z: -6.5 }, { x: 3.6, z: -6.5 },
+  { x: -3.6, z: 0 }, { x: 3.6, z: 0 },
+  { x: -3.6, z: 6.5 }, { x: 3.6, z: 6.5 },
+  { x: -3.6, z: 13 }, { x: 3.6, z: 13 },
+]
+
 function buildStorefronts(zoneIdx) {
-  const arr = []
-  for (const side of [-1, 1]) for (const z of STORE_SLOTS) {
-    arr.push({ x: side * CORRIDOR_HW, z, side, type: SHOP_TYPES[Math.floor(Math.random() * SHOP_TYPES.length)] })
+  const zone = ZONES[zoneIdx] || {}
+  let arr = []
+  if (zone.type === 'supermarche') {
+    // points de fouille = îlots de gondoles (side 0)
+    arr = MARKET_BLOCKS.map((b) => ({
+      x: b.x, z: b.z, side: 0, w: MARKET_BLOCK_W, d: MARKET_BLOCK_D,
+      type: SHOP_TYPES[Math.floor(Math.random() * SHOP_TYPES.length)],
+    }))
+  } else {
+    // points de fouille = devantures le long des deux murs
+    for (const side of [-1, 1]) for (const z of STORE_SLOTS) {
+      arr.push({ x: side * CORRIDOR_HW, z, side, type: SHOP_TYPES[Math.floor(Math.random() * SHOP_TYPES.length)] })
+    }
   }
-  // objet de quête caché dans une boutique au hasard (zones non finales)
-  const quest = (ZONES[zoneIdx] && !ZONES[zoneIdx].exit) ? QUEST_ITEMS[zoneIdx] : null
-  if (quest) arr[Math.floor(Math.random() * arr.length)].quest = quest
+  // objet de quête caché dans un point de fouille au hasard (zones non finales)
+  const quest = !zone.exit ? QUEST_ITEMS[zoneIdx] : null
+  if (quest && arr.length) arr[Math.floor(Math.random() * arr.length)].quest = quest
   return arr
 }
 
@@ -549,6 +571,20 @@ function GondolaModel({ w, d }) {
         <group key={k} position={[off, 0, 0]} rotation={[0, GONDOLA_FACE, 0]} scale={layout.scale}>
           <primitive object={clones[k]} />
         </group>
+      ))}
+    </group>
+  )
+}
+
+/* Zone "supermarché" : îlots de gondoles (obstacles fixes que l'on fouille) */
+function Supermarket({ spots }) {
+  return (
+    <group>
+      {spots.map((s, i) => (
+        <RigidBody key={i} type="fixed" colliders={false} position={[s.x, 0.6, s.z]}>
+          <CuboidCollider args={[(s.w || MARKET_BLOCK_W) / 2, 0.95, (s.d || MARKET_BLOCK_D) / 2]} position={[0, 0.3, 0]} />
+          <GondolaModel w={s.w || MARKET_BLOCK_W} d={s.d || MARKET_BLOCK_D} />
+        </RigidBody>
       ))}
     </group>
   )
@@ -1680,14 +1716,16 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         else advanceZone()
       }
 
-      /* Fouille de la devanture la plus proche (porte) */
+      /* Fouille du point le plus proche (devanture ou gondole) */
       const fronts = storefrontsRef.current
       let target = -1, best = Infinity
       for (let i = 0; i < fronts.length; i++) {
         if (!shelfStates.current[i] || !shelfStates.current[i].available) continue
         const s = fronts[i]
         const doorX = s.x - s.side * 0.6
-        const d = distToRect(px, pz, doorX, s.z, 0.9, 0.4)
+        const hw = s.side === 0 ? (s.w || MARKET_BLOCK_W) / 2 : 0.9
+        const hd = s.side === 0 ? (s.d || MARKET_BLOCK_D) / 2 : 0.4
+        const d = distToRect(px, pz, doorX, s.z, hw, hd)
         if (d < SEARCH_RANGE && d < best) { best = d; target = i }
       }
       promptRef.current = target !== -1
@@ -1744,7 +1782,8 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       const avail = shelfStates.current[i].available
       ind.visible = avail
       if (avail) {
-        ind.position.set(s.x - s.side * 1.1, 1.5 + Math.sin(now * 3 + i) * 0.12, s.z)
+        const iy = s.side === 0 ? 2.3 : 1.5
+        ind.position.set(s.x - s.side * 1.1, iy + Math.sin(now * 3 + i) * 0.12, s.z)
         ind.rotation.y = now * 1.5
       }
     }
@@ -1755,8 +1794,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       <FollowCamera target={playerPos} aimRef={aimYaw} modeRef={viewMode} />
       <Lights />
       <Arena />
-      <BenchRow />
-      <Storefronts storefronts={storefronts} />
+      {ZONES[zoneIndex].type === 'supermarche' ? (
+        <Supermarket spots={storefronts} />
+      ) : (
+        <>
+          <BenchRow />
+          <Storefronts storefronts={storefronts} />
+        </>
+      )}
       <ZoneDoor open={doorOpen} isExit={!!ZONES[zoneIndex].exit} />
       <LootIndicators storefronts={storefronts} indicatorsRef={indicatorsRef} />
       <Bullets ref={bulletsRef} registry={registry} killZombies={killZombies} shelfRectsRef={shelfRects} playing={playing} />
@@ -1859,7 +1904,7 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
           <div style={{ fontSize: 12, marginTop: 2, fontWeight: 600, color: doorOpen ? '#22c55e' : '#f87171' }}>
             {isExit
               ? (doorOpen ? '🚪 SORTIE ouverte — foncez au fond !' : '🔒 SORTIE verrouillée')
-              : (doorOpen ? '🔓 Porte ouverte — foncez au fond !' : `🔒 Objectif : trouvez ${zoneQuest || 'l\'objet de mission'} (fouillez les boutiques)`)}
+              : (doorOpen ? '🔓 Porte ouverte — foncez au fond !' : `🔒 Objectif : trouvez ${zoneQuest || 'l\'objet de mission'} (fouillez les rayons)`)}
           </div>
         </div>
       )}
