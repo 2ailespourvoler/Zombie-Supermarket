@@ -132,7 +132,7 @@ const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif,
 const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : P4 parcours complet'
+const BUILD_TAG = 'build : P4b clé + grille + dynamite'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -157,6 +157,8 @@ const PISTOL_AMMO_BONUS = 6
 const SEARCH_RANGE = 2.7
 const SEARCH_TIME = 1.2
 const SHELF_USES = 1            // fouilles possibles par boutique avant épuisement (pénurie)
+const MARKET_FOOD = 10         // faim rendue par une gondole de supermarché (peu)
+const DETONATE_TIME = 1.15     // délai (s) entre l'explosion de la sortie et la victoire
 
 /* Objectif de mission (Palier 4) : objets de recherche cachés dans les gondoles des supermarchés.
    Les galeries, elles, contiennent une CLÉ au sol qui ouvre leur porte. */
@@ -347,6 +349,7 @@ const Sfx = (() => {
     waveStart() { ensure(); blip({ type: 'sawtooth', f0: 150, f1: 320, dur: 0.5, gain: 0.3 }) },
     waveCleared() { ensure(); blip({ type: 'sine', f0: 520, f1: 780, dur: 0.18, gain: 0.3 }); setTimeout(() => blip({ type: 'sine', f0: 780, f1: 1040, dur: 0.22, gain: 0.3 }), 140) },
     gameOver() { ensure(); blip({ type: 'sawtooth', f0: 300, f1: 55, dur: 0.85, gain: 0.32 }) },
+    explosion() { ensure(); noise({ dur: 0.7, gain: 0.6, type: 'lowpass', f: 900, sweepTo: 120 }); blip({ type: 'sine', f0: 90, f1: 30, dur: 0.7, gain: 0.4 }); blip({ type: 'square', f0: 60, f1: 25, dur: 0.5, gain: 0.3 }) },
   }
 })()
 
@@ -583,10 +586,11 @@ function GondolaModel({ w, d }) {
 }
 
 /* Clé à ramasser au sol (galeries) : brille, tourne, se prend en s'approchant */
-function KeyPickup({ pos }) {
+function KeyPickup({ pos, pickedRef }) {
   const g = useRef()
   useFrame((s) => {
     if (!g.current) return
+    g.current.visible = !(pickedRef && pickedRef.current)   // disparaît une fois en poche
     g.current.rotation.y = s.clock.elapsedTime * 2
     g.current.position.y = 1.0 + Math.sin(s.clock.elapsedTime * 3) * 0.12
   })
@@ -707,22 +711,20 @@ function makeDoorLabel(text, color) {
 }
 /* Porte au fond du couloir : verrouillée (rouge) -> ouverte (verte). Collider présent seulement fermée. */
 function ZoneDoor({ open, isExit }) {
-  const panel = useRef()
-  const label = useMemo(
-    () => makeDoorLabel(isExit ? 'SORTIE' : 'ACCÈS', isExit ? '#22c55e' : '#38bdf8'),
-    [isExit],
-  )
-  const shown = open   // ouverte uniquement si déverrouillée (carte, ou liste complète pour la sortie)
+  const gate = useRef()
+  const label = useMemo(() => makeDoorLabel(isExit ? 'SORTIE' : 'ACCÈS', isExit ? '#22c55e' : '#38bdf8'), [isExit])
+  const shown = isExit ? false : open   // la sortie ne se lève pas : on la fait exploser
+  const barCol = isExit ? '#dc2626' : (open ? '#22c55e' : '#dc2626')
+  const nBars = 7
   useFrame((state, dt) => {
-    if (panel.current) {
-      const targetY = shown ? 3.7 : 1.25   // le battant se relève à l'ouverture
-      panel.current.position.y += (targetY - panel.current.position.y) * Math.min(1, dt * 4)
+    if (gate.current) {
+      const targetY = shown ? WALL_H + 0.4 : 1.25   // la grille se relève à l'ouverture
+      gate.current.position.y += (targetY - gate.current.position.y) * Math.min(1, dt * 4)
     }
   })
-  const barCol = shown ? '#22c55e' : '#dc2626'
   return (
     <group position={[0, 0, -CORRIDOR_HL + 0.4]}>
-      {/* montants latéraux (cadre) + leurs colliders */}
+      {/* montants + linteau + colliders latéraux */}
       <RigidBody type="fixed" colliders={false}>
         {[-1, 1].map((s) => (
           <mesh key={s} position={[s * (DOOR_TRIGGER_HW + 0.15), WALL_H / 2, 0]} castShadow receiveShadow>
@@ -738,16 +740,36 @@ function ZoneDoor({ open, isExit }) {
         <CuboidCollider args={[0.15, WALL_H / 2, 0.25]} position={[-(DOOR_TRIGGER_HW + 0.15), WALL_H / 2, 0]} />
       </RigidBody>
 
-      {/* collider du battant : uniquement quand la porte est fermée */}
+      {/* collider bloquant : fermé (accès) ou toujours (sortie, jusqu'à l'explosion) */}
       <RigidBody type="fixed" colliders={false}>
-        {!shown && <CuboidCollider args={[DOOR_TRIGGER_HW, 1.25, 0.12]} position={[0, 1.25, 0]} />}
+        {(isExit || !open) && <CuboidCollider args={[DOOR_TRIGGER_HW, 1.25, 0.12]} position={[0, 1.25, 0]} />}
       </RigidBody>
 
-      {/* battant coulissant (visuel) */}
-      <mesh ref={panel} position={[0, shown ? 3.7 : 1.25, 0.05]} castShadow>
-        <boxGeometry args={[DOOR_TRIGGER_HW * 2, 2.5, 0.14]} />
-        <meshStandardMaterial color={isExit ? '#14532d' : '#334155'} metalness={0.4} roughness={0.5} />
-      </mesh>
+      {isExit ? (
+        /* Porte de sortie renforcée (à faire sauter à la dynamite) */
+        <group position={[0, 1.25, 0.05]}>
+          <mesh castShadow><boxGeometry args={[DOOR_TRIGGER_HW * 2, 2.5, 0.24]} /><meshStandardMaterial color="#3a3f4b" metalness={0.6} roughness={0.4} /></mesh>
+          {[-0.7, 0.7].map((yy, k) => (
+            <mesh key={k} position={[0, yy, 0.14]}><boxGeometry args={[DOOR_TRIGGER_HW * 2, 0.3, 0.02]} /><meshStandardMaterial color="#eab308" emissive="#eab308" emissiveIntensity={0.4} /></mesh>
+          ))}
+        </group>
+      ) : (
+        /* Grille coulissante (se relève à l'ouverture) */
+        <group ref={gate} position={[0, open ? WALL_H + 0.4 : 1.25, 0.05]}>
+          {[1.15, -1.15].map((yy, k) => (
+            <mesh key={k} position={[0, yy, 0]}><boxGeometry args={[DOOR_TRIGGER_HW * 2, 0.12, 0.12]} /><meshStandardMaterial color="#64748b" metalness={0.7} roughness={0.4} /></mesh>
+          ))}
+          {Array.from({ length: nBars }).map((_, k) => {
+            const x = -DOOR_TRIGGER_HW + (k + 0.5) * (DOOR_TRIGGER_HW * 2 / nBars)
+            return (
+              <mesh key={k} position={[x, 0, 0]} castShadow>
+                <boxGeometry args={[0.08, 2.4, 0.08]} />
+                <meshStandardMaterial color="#94a3b8" metalness={0.7} roughness={0.4} />
+              </mesh>
+            )
+          })}
+        </group>
+      )}
 
       {/* barre d'état + libellé */}
       <mesh position={[0, WALL_H + 0.02, 0.28]}>
@@ -758,6 +780,31 @@ function ZoneDoor({ open, isExit }) {
         <planeGeometry args={[2.4, 0.6]} />
         <meshBasicMaterial map={label} transparent toneMapped={false} />
       </mesh>
+    </group>
+  )
+}
+
+/* Effet d'explosion de la porte de sortie */
+function Explosion({ stateRef }) {
+  const g = useRef()
+  const light = useRef()
+  useFrame((s) => {
+    if (!g.current) return
+    const st = stateRef.current
+    if (!st || !st.active) { g.current.visible = false; if (light.current) light.current.intensity = 0; return }
+    const k = Math.min(1, (s.clock.elapsedTime - st.t) / DETONATE_TIME)
+    g.current.visible = true
+    g.current.scale.setScalar(0.5 + k * 6)
+    g.current.children.forEach((m) => { if (m.material) m.material.opacity = Math.max(0, 1 - k) })
+    if (light.current) light.current.intensity = Math.max(0, (1 - k) * 14)
+  })
+  return (
+    <group position={[0, 1.3, -CORRIDOR_HL + 0.7]}>
+      <group ref={g} visible={false}>
+        <mesh><sphereGeometry args={[0.5, 16, 16]} /><meshBasicMaterial color="#ffcc55" transparent opacity={1} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>
+        <mesh><sphereGeometry args={[0.34, 16, 16]} /><meshBasicMaterial color="#ff5522" transparent opacity={1} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>
+      </group>
+      <pointLight ref={light} color="#ff8833" intensity={0} distance={22} />
     </group>
   )
 }
@@ -1579,9 +1626,12 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
 
   // --- Objectif mission (Palier 2) : objets de quête récupérés ---
   const collectedRef = useRef({})
+  const hasKeyRef = useRef(false)                       // le joueur a ramassé la clé de la galerie
+  const explosionRef = useRef({ active: false, t: 0 })  // explosion de la porte de sortie
+  const wonRef = useRef(false)
 
   const searchProgress = useRef(0)
-  const promptRef = useRef(false)
+  const promptRef = useRef(null)
   const starveTimer = useRef(0)
   const prevX = useRef(0)
   const prevZ = useRef(0)
@@ -1603,8 +1653,9 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   // changement de zone : reset vagues + boutiques + porte, téléport à l'entrée, bannière
   useEffect(() => {
     shelfStates.current = storefronts.map(() => ({ available: true, uses: SHELF_USES }))
-    // zone finale : la SORTIE ne s'ouvre que si la liste de courses est complète
-    setDoorOpen(ZONES[zoneIndex].exit ? objectiveDone(collectedRef.current) : false)
+    setDoorOpen(false)              // porte fermée à l'arrivée (clé / objet / dynamite selon la zone)
+    hasKeyRef.current = false
+    explosionRef.current = { active: false, t: 0 }
     transitioningRef.current = false
     if (firstZone.current) { firstZone.current = false; return }
     setZombies([]); registry.current.clear(); countRef.current = 0
@@ -1740,49 +1791,85 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       prevX.current = px
       prevZ.current = pz
 
-      /* Porte du fond : franchissement (sortie -> victoire, sinon -> zone suivante) */
-      const zoneDef = ZONES[zoneIndex]
-      const atDoor = pz < -CORRIDOR_HL + 1.6 && Math.abs(px) < DOOR_TRIGGER_HW
-      if (atDoor && !transitioningRef.current && doorOpenRef.current) {
-        transitioningRef.current = true
-        if (zoneDef.exit) onWin()
-        else advanceZone()
-      }
-
-      /* Clé au sol (galerie) : ramassée en s'approchant -> ouvre la porte */
-      if (zoneKey && !doorOpenRef.current) {
-        if (Math.hypot(px - zoneKey.x, pz - zoneKey.z) < KEY_PICKUP_RANGE) {
-          setDoorOpen(true)
-          Sfx.pickup('pistol')
-          onPickup("🔑 Clé trouvée — la porte du fond s'ouvre !")
-        }
-      }
-
-      /* Fouille du point le plus proche (devanture ou gondole) */
-      const fronts = storefrontsRef.current
-      let target = -1, best = Infinity
-      for (let i = 0; i < fronts.length; i++) {
-        if (!shelfStates.current[i] || !shelfStates.current[i].available) continue
-        const s = fronts[i]
-        const doorX = s.x - s.side * 0.6
-        const hw = s.side === 0 ? (s.w || MARKET_BLOCK_W) / 2 : 0.9
-        const hd = s.side === 0 ? (s.d || MARKET_BLOCK_D) / 2 : 0.4
-        const d = distToRect(px, pz, doorX, s.z, hw, hd)
-        if (d < SEARCH_RANGE && d < best) { best = d; target = i }
-      }
-      promptRef.current = target !== -1
-
+      /* Entrée "fouiller / interagir" (clavier + manette) */
       const padSearch = (() => {
         const ps = navigator.getGamepads ? navigator.getGamepads() : []
         for (let i = 0; i < ps.length; i++) { if (ps[i]) return !!ps[i].buttons[2]?.pressed }
         return false
       })()
-      if (target !== -1 && (keys.current['KeyE'] || padSearch) && moveSpeed < 1.0) {
+      const eDown = keys.current['KeyE'] || padSearch
+
+      const zoneDef = ZONES[zoneIndex]
+      const objDone = objectiveDone(collectedRef.current)
+
+      /* Explosion de la sortie en cours -> victoire après le délai */
+      if (explosionRef.current.active && !wonRef.current && now - explosionRef.current.t >= DETONATE_TIME) {
+        wonRef.current = true
+        onWin()
+      }
+
+      /* Zone d'interaction avec la porte du fond */
+      const nearDoor = pz < -CORRIDOR_HL + 3.0 && Math.abs(px) < DOOR_TRIGGER_HW + 0.8
+      const canUseKey = nearDoor && !zoneDef.exit && zoneDef.type === 'galerie' && !doorOpenRef.current && hasKeyRef.current
+      const canDetonate = nearDoor && zoneDef.exit && objDone && !explosionRef.current.active
+
+      /* Franchissement d'un accès ouvert (zones non finales) */
+      const atDoor = pz < -CORRIDOR_HL + 1.6 && Math.abs(px) < DOOR_TRIGGER_HW
+      if (atDoor && !transitioningRef.current && doorOpenRef.current && !zoneDef.exit) {
+        transitioningRef.current = true
+        advanceZone()
+      }
+
+      /* Ramassage de la clé au sol (galerie) -> clé en poche */
+      if (zoneKey && !hasKeyRef.current && Math.hypot(px - zoneKey.x, pz - zoneKey.z) < KEY_PICKUP_RANGE) {
+        hasKeyRef.current = true
+        Sfx.pickup('pistol')
+        onPickup('🔑 Clé récupérée — utilisez-la sur la grille au fond (E)')
+      }
+
+      /* Utiliser la clé sur la grille (galerie) */
+      if (canUseKey && eDown) {
+        setDoorOpen(true)
+        Sfx.pickup('ammo')
+        onPickup('🔓 Grille ouverte !')
+      }
+      /* Faire sauter la porte de sortie à la dynamite */
+      if (canDetonate && eDown) {
+        explosionRef.current = { active: true, t: now }
+        Sfx.explosion()
+        onPickup('💥 Vous faites sauter la porte de sortie !')
+      }
+
+      /* Fouille du point le plus proche (désactivée si on interagit avec la porte) */
+      const fronts = storefrontsRef.current
+      let target = -1, best = Infinity
+      if (!canUseKey && !canDetonate) {
+        for (let i = 0; i < fronts.length; i++) {
+          if (!shelfStates.current[i] || !shelfStates.current[i].available) continue
+          const s = fronts[i]
+          const doorX = s.x - s.side * 0.6
+          const hw = s.side === 0 ? (s.w || MARKET_BLOCK_W) / 2 : 0.9
+          const hd = s.side === 0 ? (s.d || MARKET_BLOCK_D) / 2 : 0.4
+          const d = distToRect(px, pz, doorX, s.z, hw, hd)
+          if (d < SEARCH_RANGE && d < best) { best = d; target = i }
+        }
+      }
+
+      /* Prompt contextuel */
+      promptRef.current = canDetonate ? 'detonate' : canUseKey ? 'key' : (target !== -1 ? 'search' : null)
+
+      if (target !== -1 && eDown && moveSpeed < 1.0) {
         searchProgress.current += dt / SEARCH_TIME
         if (searchProgress.current >= 1) {
           const s = fronts[target]
-          grantLoot(s.type)
-          if (s.quest) {                          // objet de mission -> collecté + ouvre la porte de la zone
+          if (zoneDef.type === 'supermarche') {          // gondole : seulement un peu de nourriture
+            hungerRef.current = Math.min(HUNGER_MAX, hungerRef.current + MARKET_FOOD)
+            Sfx.pickup('food')
+            onPickup('🍎 Un peu de nourriture')
+          } else {
+            grantLoot(s.type)
+          }
+          if (s.quest) {                                  // objet de mission -> collecté + ouvre la porte
             collectedRef.current[s.quest.id] = true
             setDoorOpen(true)
             Sfx.pickup('pistol')
@@ -1790,7 +1877,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           }
           const st = shelfStates.current[target]
           st.uses -= 1
-          if (st.uses <= 0) st.available = false   // épuisée définitivement (pénurie)
+          if (st.uses <= 0) st.available = false          // épuisée définitivement (pénurie)
           searchProgress.current = 0
         }
       } else {
@@ -1811,11 +1898,12 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           doorOpen: doorOpenRef.current, isExit: !!ZONES[zoneIndex].exit,
           quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: !!collectedRef.current[id] })),
           doorHint: zoneDef.exit
-            ? 'réunissez les objets de mission'
+            ? (objDone ? 'faites sauter la porte à la dynamite (E)' : 'réunissez les objets de mission')
             : zoneDef.type === 'galerie'
-              ? 'trouvez la CLÉ (cachée dans la galerie)'
+              ? (hasKeyRef.current ? 'clé en poche — ouvrez la grille au fond (E)' : 'trouvez la CLÉ (cachée dans la galerie)')
               : `trouvez ${QUEST_ITEMS[zoneDef.quest] ? QUEST_ITEMS[zoneDef.quest].label : "l'objet"} (fouillez les gondoles)`,
-          objDone: objectiveDone(collectedRef.current),
+          hasKey: hasKeyRef.current,
+          objDone,
         })
       }
     }
@@ -1846,10 +1934,11 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         <>
           <BenchRow />
           <Storefronts storefronts={storefronts} />
-          {zoneKey && !doorOpen && <KeyPickup pos={zoneKey} />}
+          {zoneKey && !doorOpen && <KeyPickup pos={zoneKey} pickedRef={hasKeyRef} />}
         </>
       )}
       <ZoneDoor open={doorOpen} isExit={!!ZONES[zoneIndex].exit} />
+      {ZONES[zoneIndex].exit && <Explosion stateRef={explosionRef} />}
       <LootIndicators storefronts={storefronts} indicatorsRef={indicatorsRef} />
       <Bullets ref={bulletsRef} registry={registry} killZombies={killZombies} shelfRectsRef={shelfRects} playing={playing} />
       <Player
@@ -1921,7 +2010,7 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, doorHint, objDone, playing, muted, onToggleMute }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, doorHint, hasKey, objDone, playing, muted, onToggleMute }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
       <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
@@ -1989,8 +2078,12 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
           </div>
         </div>
       ) : prompt ? (
-        <div style={{ position: 'absolute', bottom: 110, left: '50%', transform: 'translateX(-50%)', fontSize: 14, opacity: 0.85 }}>
-          Maintenir <b>E</b> / <b>X</b> pour fouiller le magasin
+        <div style={{ position: 'absolute', bottom: 110, left: '50%', transform: 'translateX(-50%)', fontSize: 14, opacity: 0.9 }}>
+          {prompt === 'search'
+            ? <>Maintenir <b>E</b> / <b>X</b> pour fouiller</>
+            : prompt === 'key'
+              ? <>Appuyez sur <b>E</b> / <b>X</b> pour utiliser la clé 🔑</>
+              : <>Appuyez sur <b>E</b> / <b>X</b> pour faire sauter la porte 💥</>}
         </div>
       ) : null}
 
@@ -2110,7 +2203,7 @@ export default function App() {
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
   const [uziAmmo, setUziAmmo] = useState(0)
   const [hasUzi, setHasUzi] = useState(false)
-  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', objDone: false })
+  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, objDone: false })
   const [toast, setToast] = useState(null)
   const [muted, setMuted] = useState(false)
   const [gameKey, setGameKey] = useState(0)
@@ -2149,7 +2242,7 @@ export default function App() {
     setHasPistol(START_HAS_PISTOL)
     setUziAmmo(0)
     setHasUzi(false)
-    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: false, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', objDone: false })
+    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, objDone: false })
     setToast(null)
     setGameKey((k) => k + 1)
   }
@@ -2204,6 +2297,7 @@ export default function App() {
         isExit={survival.isExit}
         quest={survival.quest}
         doorHint={survival.doorHint}
+        hasKey={survival.hasKey}
         objDone={survival.objDone}
         playing={gameState === 'playing'}
         muted={muted}
