@@ -132,7 +132,7 @@ const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif,
 const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : P4c explosion + compte à rebours'
+const BUILD_TAG = 'build : P5a arène + boss'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -174,10 +174,18 @@ const KEY_PICKUP_RANGE = 1.7   // distance de ramassage de la clé (galerie)
 const CORRIDOR_HW = 6            // demi-largeur du couloir jouable (x ∈ [-6, 6])
 const CORRIDOR_HL = 22           // demi-longueur (z ∈ [-22, 22])
 const WALL_H = 3.4               // hauteur des murs / devantures
-const PLAYER_START_Z = CORRIDOR_HL - 10  // départ avancé dans l'espace dégagé (évite le banc à z=15)
+const PLAYER_START_Z = CORRIDOR_HL - 4   // départ légèrement avancé, avant le 1er banc (z=15)
 const FUSE_TIME = 3.0            // compte à rebours (s) avant l'explosion de la sortie
 const BLAST_RADIUS = 5.5         // rayon de la déflagration (dégâts si trop proche)
 const BLAST_DAMAGE = 55          // dégâts au centre de l'explosion
+
+/* Arène finale (Palier 5) */
+const ARENA_HALF = 5             // demi-côté du carré de barrières anti-émeute
+const ARENA_CENTER_Z = 0         // centre de l'arène (le projecteur pointe ici)
+const BOSS_SCALE = 1.9           // taille du boss (provisoire : gros zombie)
+const BOSS_HP_1 = 40             // phase 1 (arme à feu) : ~20 balles (BULLET_DAMAGE=2)
+const BOSS_HP_2 = 12             // phase 2 (sabre) : ~12 coups (SABRE_DAMAGE=1)
+const BOSS_SPEED_MUL = 0.55      // boss lent et menaçant
 const SHOP_TYPES = ['pharmacie', 'armurerie', 'epicerie', 'boulangerie']
 const STORE_SLOTS = [-18, -12, -6, 0, 6, 12, 18]   // centres z des devantures
 const STORE_W = 5.4              // largeur d'une devanture (le long de z)
@@ -192,7 +200,8 @@ const ZONES = [
   { name: 'Supermarché 1', type: 'supermarche', quest: 'dynamite' },
   { name: 'Galerie 2', type: 'galerie' },
   { name: 'Supermarché 2', type: 'supermarche', quest: 'meds' },
-  { name: 'Galerie de sortie', type: 'galerie', exit: true },   // dernière zone : la SORTIE
+  { name: 'Galerie de sortie', type: 'galerie', exit: true },   // on fait sauter la porte -> arène
+  { name: 'Arène finale', type: 'arene' },                       // combat final : boss
 ]
 const DOOR_TRIGGER_HW = 2.2      // demi-largeur de la porte du fond (zone de passage)
 
@@ -434,6 +443,55 @@ function Lights() {
         shadow-camera-bottom={-30}
       />
     </>
+  )
+}
+
+/* Éclairage de l'arène : entrepôt sombre + projecteur sur le carré */
+function ArenaLights() {
+  return (
+    <>
+      <ambientLight intensity={0.08} />
+      <spotLight position={[0, 17, ARENA_CENTER_Z]} angle={0.62} penumbra={0.5} intensity={2.6} distance={44} castShadow color="#fff2d8" shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
+      <pointLight position={[0, 6, ARENA_CENTER_Z]} intensity={0.35} distance={18} color="#7f9dff" />
+    </>
+  )
+}
+
+/* Un côté de barrière anti-émeute (le long de X ; le parent l'oriente) */
+function BarrierSide({ length }) {
+  const n = Math.max(2, Math.round(length / 1.0))
+  return (
+    <group>
+      {[1.0, 0.55].map((y, k) => (
+        <mesh key={k} position={[0, y, 0]}><boxGeometry args={[length, 0.06, 0.06]} /><meshStandardMaterial color="#9aa3ad" metalness={0.6} roughness={0.5} /></mesh>
+      ))}
+      {Array.from({ length: n + 1 }).map((_, k) => {
+        const x = -length / 2 + k * (length / n)
+        return <mesh key={k} position={[x, 0.62, 0]}><boxGeometry args={[0.05, 1.2, 0.05]} /><meshStandardMaterial color="#8a929c" metalness={0.6} roughness={0.5} /></mesh>
+      })}
+      <mesh position={[0, 0.06, 0]}><boxGeometry args={[length, 0.12, 0.35]} /><meshStandardMaterial color="#6b7280" metalness={0.5} roughness={0.6} /></mesh>
+    </group>
+  )
+}
+
+/* Carré de barrières de l'arène (côté = half*2) */
+function ArenaBarriers({ half }) {
+  const L = half * 2
+  return (
+    <group position={[0, 0, ARENA_CENTER_Z]}>
+      {[-half, half].map((z, i) => (
+        <RigidBody key={'ns' + i} type="fixed" colliders={false} position={[0, 0, z]}>
+          <CuboidCollider args={[half, 0.7, 0.1]} position={[0, 0.7, 0]} />
+          <BarrierSide length={L} />
+        </RigidBody>
+      ))}
+      {[-half, half].map((x, i) => (
+        <RigidBody key={'ew' + i} type="fixed" colliders={false} position={[x, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+          <CuboidCollider args={[half, 0.7, 0.1]} position={[0, 0.7, 0]} />
+          <BarrierSide length={L} />
+        </RigidBody>
+      ))}
+    </group>
   )
 }
 
@@ -892,6 +950,15 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsR
               if (e.armored) {
                 e.armorSpark = now            // ricochet sur le gilet, aucun dégât
                 Sfx.ricochet()
+              } else if (e.boss) {
+                if (e.phase === 1) {
+                  e.hp -= BULLET_DAMAGE
+                  e.hitFlash = now
+                  if (e.hp <= 0) { e.phase = 2; e.hp = BOSS_HP_2 }   // phase 2 : au sabre
+                } else {
+                  e.armorSpark = now            // phase 2 : les balles ne font rien
+                  Sfx.ricochet()
+                }
               } else {
                 e.hp -= BULLET_DAMAGE
                 e.hitFlash = now
@@ -1244,9 +1311,14 @@ function Player({ posRef, bodyRef, registry, killZombies, bulletsRef, shelfRects
           if (d < SABRE_RANGE && d > 0.001) {
             const dot = (vx / d) * fx + (vz / d) * fz
             if (dot > cosHalf && !losBlocked(shelfRectsRef.current, t.x, t.z, z.pos.x, z.pos.z)) {
-              z.hp -= z.fat ? FAT_SABRE_DAMAGE : SABRE_DAMAGE
-              z.hitFlash = now
-              if (z.hp <= 0) kills.push(id)
+              if (z.boss) {
+                if (z.phase === 2) { z.hp -= SABRE_DAMAGE; z.hitFlash = now; if (z.hp <= 0) kills.push(id) }
+                // phase 1 : le sabre ne fait rien au boss
+              } else {
+                z.hp -= z.fat ? FAT_SABRE_DAMAGE : SABRE_DAMAGE
+                z.hitFlash = now
+                if (z.hp <= 0) kills.push(id)
+              }
             }
           }
         })
@@ -1529,13 +1601,13 @@ function FatZombieModel({ gait, speedMul, stateRef, entryRef }) {
   )
 }
 
-function Zombie({ id, spawn, armored, fat, female, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
+function Zombie({ id, spawn, armored, fat, female, boss, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
   const body = useRef()
   const visual = useRef()
   const stateRef = useRef('walk')
   const entry = useRef({
     pos: new THREE.Vector3(spawn[0], 1, spawn[1]),
-    lastHit: -10, hp: fat ? FAT_HP : ZOMBIE_HP, armored, fat, hitFlash: -10, armorSpark: -10, dying: false,
+    lastHit: -10, hp: boss ? BOSS_HP_1 : fat ? FAT_HP : ZOMBIE_HP, armored, fat, boss, phase: boss ? 1 : 0, hitFlash: -10, armorSpark: -10, dying: false,
   })
 
   useEffect(() => {
@@ -1549,7 +1621,7 @@ function Zombie({ id, spawn, armored, fat, female, gait, speedMul, dying, posRef
     entry.current.dying = true
     stateRef.current = 'death'
     registry.current.delete(id)
-    const ms = fat ? 2800 : 2300   // laisse le corps jouer sa mort avant suppression
+    const ms = boss ? 3400 : fat ? 2800 : 2300   // laisse le corps jouer sa mort avant suppression
     const tmr = setTimeout(() => onRemove(id), ms)
     return () => clearTimeout(tmr)
   }, [dying, armored, id, onRemove, registry])
@@ -1576,7 +1648,7 @@ function Zombie({ id, spawn, armored, fat, female, gait, speedMul, dying, posRef
       stateRef.current = d < CONTACT_RANGE ? 'attack' : 'walk'
       if (d < CONTACT_RANGE && now - entry.current.lastHit > HIT_COOLDOWN) {
         entry.current.lastHit = now
-        onDamage(ZOMBIE_DAMAGE)
+        onDamage(boss ? ZOMBIE_DAMAGE * 2 : ZOMBIE_DAMAGE)
         Sfx.hurt()
       }
     }
@@ -1589,13 +1661,13 @@ function Zombie({ id, spawn, armored, fat, female, gait, speedMul, dying, posRef
       position={[spawn[0], 1, spawn[1]]}
       colliders={false}
       enabledRotations={[false, false, false]}
-      mass={fat ? 2.2 : armored ? 1.6 : 1}
+      mass={boss ? 4 : fat ? 2.2 : armored ? 1.6 : 1}
       linearDamping={0.5}
-      ccd={fat}
+      ccd={fat || boss}
     >
-      <CapsuleCollider args={fat ? [0.38, 0.62] : [0.4, 0.4]} />
-      <group ref={visual}>
-        {fat ? (
+      <CapsuleCollider args={boss ? [1.0, 0.8] : fat ? [0.38, 0.62] : [0.4, 0.4]} />
+      <group ref={visual} scale={boss ? BOSS_SCALE : 1}>
+        {boss || fat ? (
           <FatZombieModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
         ) : armored ? (
           <BobModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
@@ -1664,6 +1736,8 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const fuseRef = useRef({ active: false, t: 0, lastBeep: 0 })  // mèche de la sortie (compte à rebours)
   const explosionRef = useRef({ active: false, t: 0 })  // explosion de la porte de sortie
   const wonRef = useRef(false)
+  const bossIdRef = useRef(null)      // id du boss dans le registre
+  const bossSeenRef = useRef(false)   // le boss a été enregistré au moins une fois
 
   const searchProgress = useRef(0)
   const promptRef = useRef(null)
@@ -1697,8 +1771,18 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     setZombies([]); registry.current.clear(); countRef.current = 0
     waveRef.current = 1; waveTimer.current = 0; spawnedThisWave.current = 0; spawnTimer.current = 0
     searchProgress.current = 0
-    playerBody.current?.setTranslation({ x: 0, y: 0.9, z: PLAYER_START_Z }, true)
+    bossIdRef.current = null
+    bossSeenRef.current = false
+    const arena = ZONES[zoneIndex].type === 'arene'
+    const startZ = arena ? ARENA_CENTER_Z + 3 : PLAYER_START_Z
+    playerBody.current?.setTranslation({ x: 0, y: 0.9, z: startZ }, true)
     playerBody.current?.setLinvel({ x: 0, y: 0, z: 0 }, true)
+    if (arena) {
+      // apparition du boss au centre de l'arène
+      const bid = idRef.current++
+      bossIdRef.current = bid
+      setZombies([{ id: bid, spawn: [0, ARENA_CENTER_Z - 3], boss: true, gait: 'limp', speedMul: BOSS_SPEED_MUL }])
+    }
     zoneBannerRef.current = ZONES[zoneIndex].name.toUpperCase()
     pendingBanner.current = true
     Sfx.waveStart()
@@ -1855,10 +1939,16 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         }
       }
 
-      /* Explosion terminée -> victoire */
-      if (explosionRef.current.active && !wonRef.current && now - explosionRef.current.t >= DETONATE_TIME) {
-        wonRef.current = true
-        onWin()
+      /* Explosion terminée -> on passe à l'arène finale */
+      if (explosionRef.current.active && !transitioningRef.current && now - explosionRef.current.t >= DETONATE_TIME) {
+        transitioningRef.current = true
+        advanceZone()
+      }
+
+      /* Arène : victoire quand le boss est abattu */
+      if (ZONES[zoneIndex].type === 'arene' && bossIdRef.current != null) {
+        if (registry.current.get(bossIdRef.current)) bossSeenRef.current = true
+        else if (bossSeenRef.current && !wonRef.current) { wonRef.current = true; onWin() }
       }
 
       /* Zone d'interaction avec la porte du fond */
@@ -1957,6 +2047,10 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
               : `trouvez ${QUEST_ITEMS[zoneDef.quest] ? QUEST_ITEMS[zoneDef.quest].label : "l'objet"} (fouillez les gondoles)`,
           hasKey: hasKeyRef.current,
           fuse: fuseRef.current.active ? Math.max(0, Math.ceil(FUSE_TIME - (now - fuseRef.current.t))) : null,
+          boss: (() => {
+            const be = bossIdRef.current != null ? registry.current.get(bossIdRef.current) : null
+            return be ? { hp: be.hp, max: be.phase === 1 ? BOSS_HP_1 : BOSS_HP_2, phase: be.phase } : null
+          })(),
           objDone,
         })
       }
@@ -1980,20 +2074,30 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   return (
     <>
       <FollowCamera target={playerPos} aimRef={aimYaw} modeRef={viewMode} shakeRef={explosionRef} />
-      <Lights />
-      <Arena />
-      {ZONES[zoneIndex].type === 'supermarche' ? (
-        <Supermarket spots={storefronts} />
+      {ZONES[zoneIndex].type === 'arene' ? (
+        <>
+          <ArenaLights />
+          <Arena />
+          <ArenaBarriers half={ARENA_HALF} />
+        </>
       ) : (
         <>
-          <BenchRow />
-          <Storefronts storefronts={storefronts} />
-          {zoneKey && !doorOpen && <KeyPickup pos={zoneKey} pickedRef={hasKeyRef} />}
+          <Lights />
+          <Arena />
+          {ZONES[zoneIndex].type === 'supermarche' ? (
+            <Supermarket spots={storefronts} />
+          ) : (
+            <>
+              <BenchRow />
+              <Storefronts storefronts={storefronts} />
+              {zoneKey && !doorOpen && <KeyPickup pos={zoneKey} pickedRef={hasKeyRef} />}
+            </>
+          )}
+          <ZoneDoor open={doorOpen} isExit={!!ZONES[zoneIndex].exit} />
+          {ZONES[zoneIndex].exit && <Explosion stateRef={explosionRef} />}
+          <LootIndicators storefronts={storefronts} indicatorsRef={indicatorsRef} />
         </>
       )}
-      <ZoneDoor open={doorOpen} isExit={!!ZONES[zoneIndex].exit} />
-      {ZONES[zoneIndex].exit && <Explosion stateRef={explosionRef} />}
-      <LootIndicators storefronts={storefronts} indicatorsRef={indicatorsRef} />
       <Bullets ref={bulletsRef} registry={registry} killZombies={killZombies} shelfRectsRef={shelfRects} playing={playing} />
       <Player
         posRef={playerPos}
@@ -2021,6 +2125,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
           armored={z.armored}
           fat={z.fat}
           female={z.female}
+          boss={z.boss}
           gait={z.gait}
           speedMul={z.speedMul}
           dying={z.dying}
@@ -2064,7 +2169,7 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, doorHint, hasKey, fuse, objDone, playing, muted, onToggleMute }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, doorHint, hasKey, fuse, boss, objDone, playing, muted, onToggleMute }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
       <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
@@ -2128,6 +2233,17 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
         <div style={{ position: 'absolute', top: '32%', left: '50%', transform: 'translateX(-50%)', textAlign: 'center', pointerEvents: 'none' }}>
           <div style={{ fontSize: 96, fontWeight: 900, color: '#f97316', textShadow: '0 0 30px #f9731688, 0 4px 12px #000', lineHeight: 1 }}>{fuse}</div>
           <div style={{ fontSize: 20, fontWeight: 800, color: '#fca5a5', letterSpacing: 2, textShadow: '0 2px 8px #000' }}>ÉLOIGNEZ-VOUS !</div>
+        </div>
+      )}
+
+      {boss && (
+        <div style={{ position: 'absolute', top: 52, left: '50%', transform: 'translateX(-50%)', width: 'min(72vw, 560px)', textAlign: 'center', pointerEvents: 'none' }}>
+          <div style={{ fontSize: 13, fontWeight: 800, letterSpacing: 2, color: boss.phase === 1 ? '#fca5a5' : '#fdba74', marginBottom: 4, textShadow: '0 2px 8px #000' }}>
+            BOSS · {boss.phase === 1 ? 'PHASE 1 — ARME À FEU 🔫' : 'PHASE 2 — SABRE ⚔️'}
+          </div>
+          <div style={{ height: 16, background: '#00000066', borderRadius: 8, overflow: 'hidden', border: '1px solid #ffffff33' }}>
+            <div style={{ width: `${Math.max(0, Math.min(100, (boss.hp / boss.max) * 100))}%`, height: '100%', background: boss.phase === 1 ? 'linear-gradient(90deg,#ef4444,#b91c1c)' : 'linear-gradient(90deg,#f97316,#c2410c)', transition: 'width 0.12s' }} />
+          </div>
         </div>
       )}
 
@@ -2264,7 +2380,7 @@ export default function App() {
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
   const [uziAmmo, setUziAmmo] = useState(0)
   const [hasUzi, setHasUzi] = useState(false)
-  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, fuse: null, objDone: false })
+  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, fuse: null, boss: null, objDone: false })
   const [toast, setToast] = useState(null)
   const [muted, setMuted] = useState(false)
   const [gameKey, setGameKey] = useState(0)
@@ -2303,7 +2419,7 @@ export default function App() {
     setHasPistol(START_HAS_PISTOL)
     setUziAmmo(0)
     setHasUzi(false)
-    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, fuse: null, objDone: false })
+    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, fuse: null, boss: null, objDone: false })
     setToast(null)
     setGameKey((k) => k + 1)
   }
@@ -2360,6 +2476,7 @@ export default function App() {
         doorHint={survival.doorHint}
         hasKey={survival.hasKey}
         fuse={survival.fuse}
+        boss={survival.boss}
         objDone={survival.objDone}
         playing={gameState === 'playing'}
         muted={muted}
