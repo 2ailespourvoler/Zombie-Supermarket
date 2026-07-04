@@ -132,7 +132,7 @@ const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif,
 const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : P4b clé + grille + dynamite'
+const BUILD_TAG = 'build : P4c explosion + compte à rebours'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -174,6 +174,10 @@ const KEY_PICKUP_RANGE = 1.7   // distance de ramassage de la clé (galerie)
 const CORRIDOR_HW = 6            // demi-largeur du couloir jouable (x ∈ [-6, 6])
 const CORRIDOR_HL = 22           // demi-longueur (z ∈ [-22, 22])
 const WALL_H = 3.4               // hauteur des murs / devantures
+const PLAYER_START_Z = CORRIDOR_HL - 10  // départ avancé dans l'espace dégagé (évite le banc à z=15)
+const FUSE_TIME = 3.0            // compte à rebours (s) avant l'explosion de la sortie
+const BLAST_RADIUS = 5.5         // rayon de la déflagration (dégâts si trop proche)
+const BLAST_DAMAGE = 55          // dégâts au centre de l'explosion
 const SHOP_TYPES = ['pharmacie', 'armurerie', 'epicerie', 'boulangerie']
 const STORE_SLOTS = [-18, -12, -6, 0, 6, 12, 18]   // centres z des devantures
 const STORE_W = 5.4              // largeur d'une devanture (le long de z)
@@ -374,7 +378,7 @@ function useKeyboard() {
 /* ---------------------------------------------------------------- */
 /* Caméra                                                            */
 /* ---------------------------------------------------------------- */
-function FollowCamera({ target, aimRef, modeRef }) {
+function FollowCamera({ target, aimRef, modeRef, shakeRef }) {
   const { camera } = useThree()
   const fpsYaw = useRef(0)
   useFrame((state, dt) => {
@@ -395,6 +399,14 @@ function FollowCamera({ target, aimRef, modeRef }) {
     }
     camTarget.set(p.x, p.y + 14, p.z + 11)
     camera.position.lerp(camTarget, 0.1)
+    // secousse pendant l'explosion de la sortie
+    if (shakeRef && shakeRef.current && shakeRef.current.active) {
+      const k = Math.min(1, (state.clock.elapsedTime - shakeRef.current.t) / DETONATE_TIME)
+      const amp = (1 - k) * 0.7
+      camera.position.x += (Math.random() - 0.5) * amp
+      camera.position.y += (Math.random() - 0.5) * amp
+      camera.position.z += (Math.random() - 0.5) * amp
+    }
     camera.lookAt(p.x, p.y + 0.5, p.z)
   })
   return null
@@ -786,25 +798,47 @@ function ZoneDoor({ open, isExit }) {
 
 /* Effet d'explosion de la porte de sortie */
 function Explosion({ stateRef }) {
-  const g = useRef()
-  const light = useRef()
+  const fire = useRef(), ring = useRef(), flash = useRef(), light = useRef()
   useFrame((s) => {
-    if (!g.current) return
     const st = stateRef.current
-    if (!st || !st.active) { g.current.visible = false; if (light.current) light.current.intensity = 0; return }
-    const k = Math.min(1, (s.clock.elapsedTime - st.t) / DETONATE_TIME)
-    g.current.visible = true
-    g.current.scale.setScalar(0.5 + k * 6)
-    g.current.children.forEach((m) => { if (m.material) m.material.opacity = Math.max(0, 1 - k) })
-    if (light.current) light.current.intensity = Math.max(0, (1 - k) * 14)
+    const active = !!(st && st.active)
+    const k = active ? Math.min(1, (s.clock.elapsedTime - st.t) / DETONATE_TIME) : 1
+    if (fire.current) {
+      fire.current.visible = active
+      fire.current.scale.setScalar(0.6 + k * 6)
+      fire.current.children.forEach((m) => { if (m.material) m.material.opacity = Math.max(0, 1 - k) })
+    }
+    if (ring.current) {
+      const rk = Math.min(1, k * 1.5)
+      ring.current.visible = active
+      ring.current.scale.set(1 + rk * 9, 1 + rk * 9, 1)
+      if (ring.current.material) ring.current.material.opacity = Math.max(0, 1 - rk)
+    }
+    if (flash.current) {
+      const fk = Math.min(1, k / 0.18)
+      flash.current.visible = active && fk < 1
+      flash.current.scale.setScalar(1 + fk * 8)
+      if (flash.current.material) flash.current.material.opacity = Math.max(0, 1 - fk)
+    }
+    if (light.current) light.current.intensity = active ? Math.max(0, (1 - k) * 22) : 0
   })
+  const addBlend = { transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }
   return (
-    <group position={[0, 1.3, -CORRIDOR_HL + 0.7]}>
-      <group ref={g} visible={false}>
-        <mesh><sphereGeometry args={[0.5, 16, 16]} /><meshBasicMaterial color="#ffcc55" transparent opacity={1} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>
-        <mesh><sphereGeometry args={[0.34, 16, 16]} /><meshBasicMaterial color="#ff5522" transparent opacity={1} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} /></mesh>
+    <group position={[0, 1.4, -CORRIDOR_HL + 0.7]}>
+      <group ref={fire} visible={false}>
+        <mesh><sphereGeometry args={[0.5, 20, 20]} /><meshBasicMaterial color="#ffd27f" opacity={1} {...addBlend} /></mesh>
+        <mesh><sphereGeometry args={[0.36, 20, 20]} /><meshBasicMaterial color="#ff6a1f" opacity={1} {...addBlend} /></mesh>
+        <mesh><sphereGeometry args={[0.22, 16, 16]} /><meshBasicMaterial color="#ffffff" opacity={1} {...addBlend} /></mesh>
       </group>
-      <pointLight ref={light} color="#ff8833" intensity={0} distance={22} />
+      <mesh ref={ring} rotation={[-Math.PI / 2, 0, 0]} position={[0, -1.0, 0]} visible={false}>
+        <torusGeometry args={[0.6, 0.14, 8, 40]} />
+        <meshBasicMaterial color="#ffb04a" opacity={1} {...addBlend} />
+      </mesh>
+      <mesh ref={flash} visible={false}>
+        <sphereGeometry args={[0.6, 16, 16]} />
+        <meshBasicMaterial color="#ffffff" opacity={1} {...addBlend} />
+      </mesh>
+      <pointLight ref={light} color="#ff8833" intensity={0} distance={26} />
     </group>
   )
 }
@@ -1243,7 +1277,7 @@ function Player({ posRef, bodyRef, registry, killZombies, bulletsRef, shelfRects
     <RigidBody
       ref={(el) => { body.current = el; if (bodyRef) bodyRef.current = el }}
       type="dynamic"
-      position={[0, 0.9, CORRIDOR_HL - 2]}
+      position={[0, 0.9, PLAYER_START_Z]}
       colliders={false}
       enabledRotations={[false, false, false]}
       mass={3}
@@ -1579,7 +1613,7 @@ function Zombie({ id, spawn, armored, fat, female, gait, speedMul, dying, posRef
 /* Logique de jeu (mémoïsée)                                         */
 /* ---------------------------------------------------------------- */
 const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, onAmmo, onUziAmmo, onPistol, onUzi, onSurvival, onPickup, onWin }) {
-  const playerPos = useRef(new THREE.Vector3(0, 0.9, CORRIDOR_HL - 2))   // départ à l'entrée
+  const playerPos = useRef(new THREE.Vector3(0, 0.9, PLAYER_START_Z))   // départ à l'entrée
   const playerBody = useRef()
   const registry = useRef(new Map())
   const bulletsRef = useRef()
@@ -1627,6 +1661,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   // --- Objectif mission (Palier 2) : objets de quête récupérés ---
   const collectedRef = useRef({})
   const hasKeyRef = useRef(false)                       // le joueur a ramassé la clé de la galerie
+  const fuseRef = useRef({ active: false, t: 0, lastBeep: 0 })  // mèche de la sortie (compte à rebours)
   const explosionRef = useRef({ active: false, t: 0 })  // explosion de la porte de sortie
   const wonRef = useRef(false)
 
@@ -1655,13 +1690,14 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
     shelfStates.current = storefronts.map(() => ({ available: true, uses: SHELF_USES }))
     setDoorOpen(false)              // porte fermée à l'arrivée (clé / objet / dynamite selon la zone)
     hasKeyRef.current = false
+    fuseRef.current = { active: false, t: 0, lastBeep: 0 }
     explosionRef.current = { active: false, t: 0 }
     transitioningRef.current = false
     if (firstZone.current) { firstZone.current = false; return }
     setZombies([]); registry.current.clear(); countRef.current = 0
     waveRef.current = 1; waveTimer.current = 0; spawnedThisWave.current = 0; spawnTimer.current = 0
     searchProgress.current = 0
-    playerBody.current?.setTranslation({ x: 0, y: 0.9, z: CORRIDOR_HL - 2 }, true)
+    playerBody.current?.setTranslation({ x: 0, y: 0.9, z: PLAYER_START_Z }, true)
     playerBody.current?.setLinvel({ x: 0, y: 0, z: 0 }, true)
     zoneBannerRef.current = ZONES[zoneIndex].name.toUpperCase()
     pendingBanner.current = true
@@ -1802,7 +1838,24 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       const zoneDef = ZONES[zoneIndex]
       const objDone = objectiveDone(collectedRef.current)
 
-      /* Explosion de la sortie en cours -> victoire après le délai */
+      /* Mèche allumée : compte à rebours, bips, puis explosion + dégâts de proximité */
+      if (fuseRef.current.active) {
+        const el = now - fuseRef.current.t
+        const secLeft = Math.ceil(FUSE_TIME - el)
+        if (secLeft !== fuseRef.current.lastBeep && secLeft > 0) { fuseRef.current.lastBeep = secLeft; Sfx.pickup('ammo') }
+        if (el >= FUSE_TIME) {
+          fuseRef.current.active = false
+          explosionRef.current = { active: true, t: now }
+          Sfx.explosion()
+          const dExpl = Math.hypot(px, pz - (-CORRIDOR_HL + 0.4))   // distance à la porte
+          if (dExpl < BLAST_RADIUS) {
+            const dmg = Math.round(BLAST_DAMAGE * (1 - dExpl / BLAST_RADIUS))
+            if (dmg > 0) { onDamage(dmg); onPickup("🔥 Le souffle de l'explosion vous touche !") }
+          }
+        }
+      }
+
+      /* Explosion terminée -> victoire */
       if (explosionRef.current.active && !wonRef.current && now - explosionRef.current.t >= DETONATE_TIME) {
         wonRef.current = true
         onWin()
@@ -1811,7 +1864,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
       /* Zone d'interaction avec la porte du fond */
       const nearDoor = pz < -CORRIDOR_HL + 3.0 && Math.abs(px) < DOOR_TRIGGER_HW + 0.8
       const canUseKey = nearDoor && !zoneDef.exit && zoneDef.type === 'galerie' && !doorOpenRef.current && hasKeyRef.current
-      const canDetonate = nearDoor && zoneDef.exit && objDone && !explosionRef.current.active
+      const canDetonate = nearDoor && zoneDef.exit && objDone && !explosionRef.current.active && !fuseRef.current.active
 
       /* Franchissement d'un accès ouvert (zones non finales) */
       const atDoor = pz < -CORRIDOR_HL + 1.6 && Math.abs(px) < DOOR_TRIGGER_HW
@@ -1833,11 +1886,11 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         Sfx.pickup('ammo')
         onPickup('🔓 Grille ouverte !')
       }
-      /* Faire sauter la porte de sortie à la dynamite */
+      /* Amorcer la dynamite sur la porte de sortie (mèche de 3 s) */
       if (canDetonate && eDown) {
-        explosionRef.current = { active: true, t: now }
-        Sfx.explosion()
-        onPickup('💥 Vous faites sauter la porte de sortie !')
+        fuseRef.current = { active: true, t: now, lastBeep: 0 }
+        Sfx.pickup('ammo')
+        onPickup('🧨 Dynamite amorcée — éloignez-vous, ça va sauter !')
       }
 
       /* Fouille du point le plus proche (désactivée si on interagit avec la porte) */
@@ -1903,6 +1956,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
               ? (hasKeyRef.current ? 'clé en poche — ouvrez la grille au fond (E)' : 'trouvez la CLÉ (cachée dans la galerie)')
               : `trouvez ${QUEST_ITEMS[zoneDef.quest] ? QUEST_ITEMS[zoneDef.quest].label : "l'objet"} (fouillez les gondoles)`,
           hasKey: hasKeyRef.current,
+          fuse: fuseRef.current.active ? Math.max(0, Math.ceil(FUSE_TIME - (now - fuseRef.current.t))) : null,
           objDone,
         })
       }
@@ -1925,7 +1979,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
 
   return (
     <>
-      <FollowCamera target={playerPos} aimRef={aimYaw} modeRef={viewMode} />
+      <FollowCamera target={playerPos} aimRef={aimYaw} modeRef={viewMode} shakeRef={explosionRef} />
       <Lights />
       <Arena />
       {ZONES[zoneIndex].type === 'supermarche' ? (
@@ -2010,7 +2064,7 @@ function WeaponSlot({ keyLabel, name, sub, active, danger, locked }) {
   )
 }
 
-function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, doorHint, hasKey, objDone, playing, muted, onToggleMute }) {
+function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, search, prompt, toast, wave, banner, countdown, remaining, zoneName, zone, zoneCount, doorOpen, isExit, quest, doorHint, hasKey, fuse, objDone, playing, muted, onToggleMute }) {
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', color: '#fff', fontFamily: 'system-ui' }}>
       <style>{`@keyframes waveIn{from{opacity:0;transform:translate(-50%,-50%) scale(0.85)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}`}</style>
@@ -2068,6 +2122,13 @@ function HUD({ health, hunger, score, weapon, ammo, hasPistol, uziAmmo, hasUzi, 
 
       {toast && (
         <div style={{ position: 'absolute', top: 90, left: '50%', transform: 'translateX(-50%)', padding: '8px 18px', background: '#000000bb', borderRadius: 10, fontWeight: 600, fontSize: 15 }}>{toast}</div>
+      )}
+
+      {fuse != null && fuse > 0 && (
+        <div style={{ position: 'absolute', top: '32%', left: '50%', transform: 'translateX(-50%)', textAlign: 'center', pointerEvents: 'none' }}>
+          <div style={{ fontSize: 96, fontWeight: 900, color: '#f97316', textShadow: '0 0 30px #f9731688, 0 4px 12px #000', lineHeight: 1 }}>{fuse}</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: '#fca5a5', letterSpacing: 2, textShadow: '0 2px 8px #000' }}>ÉLOIGNEZ-VOUS !</div>
+        </div>
       )}
 
       {search > 0 ? (
@@ -2203,7 +2264,7 @@ export default function App() {
   const [hasPistol, setHasPistol] = useState(START_HAS_PISTOL)
   const [uziAmmo, setUziAmmo] = useState(0)
   const [hasUzi, setHasUzi] = useState(false)
-  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, objDone: false })
+  const [survival, setSurvival] = useState({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, fuse: null, objDone: false })
   const [toast, setToast] = useState(null)
   const [muted, setMuted] = useState(false)
   const [gameKey, setGameKey] = useState(0)
@@ -2242,7 +2303,7 @@ export default function App() {
     setHasPistol(START_HAS_PISTOL)
     setUziAmmo(0)
     setHasUzi(false)
-    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, objDone: false })
+    setSurvival({ hunger: HUNGER_MAX, search: 0, prompt: null, wave: 1, banner: 'VAGUE 1', countdown: WAVE_DURATION, remaining: 0, zone: 0, zoneName: ZONES[0].name, zoneCount: ZONES.length, doorOpen: false, isExit: false, quest: QUEST_ORDER.map((id) => ({ label: QUEST_ITEMS[id].label, emoji: QUEST_ITEMS[id].emoji, done: false })), doorHint: 'trouvez la CLÉ (cachée dans la galerie)', hasKey: false, fuse: null, objDone: false })
     setToast(null)
     setGameKey((k) => k + 1)
   }
@@ -2298,6 +2359,7 @@ export default function App() {
         quest={survival.quest}
         doorHint={survival.doorHint}
         hasKey={survival.hasKey}
+        fuse={survival.fuse}
         objDone={survival.objDone}
         playing={gameState === 'playing'}
         muted={muted}
