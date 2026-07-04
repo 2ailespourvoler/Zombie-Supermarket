@@ -132,7 +132,7 @@ const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif,
 const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : P5a arène + boss'
+const BUILD_TAG = 'build : P5b boss réel'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -180,12 +180,20 @@ const BLAST_RADIUS = 5.5         // rayon de la déflagration (dégâts si trop 
 const BLAST_DAMAGE = 55          // dégâts au centre de l'explosion
 
 /* Arène finale (Palier 5) */
-const ARENA_HALF = 5             // demi-côté du carré de barrières anti-émeute
+const ARENA_HALF = 6.5           // demi-côté du carré (agrandi de 30 %)
 const ARENA_CENTER_Z = 0         // centre de l'arène (le projecteur pointe ici)
-const BOSS_SCALE = 1.9           // taille du boss (provisoire : gros zombie)
+const BOSS_URL = '/boss.glb'
+const BOSS_MODEL_SCALE = 1.7     // taille du boss
+const BOSS_FEET_Y = -1.5         // cale les pieds au sol (à ajuster si flotte/s'enfonce)
 const BOSS_HP_1 = 40             // phase 1 (arme à feu) : ~20 balles (BULLET_DAMAGE=2)
 const BOSS_HP_2 = 12             // phase 2 (sabre) : ~12 coups (SABRE_DAMAGE=1)
-const BOSS_SPEED_MUL = 0.55      // boss lent et menaçant
+const BOSS_SPEED_MUL = 0.9       // boss actif (court vers le joueur)
+const BOSS_DODGE_SPEED = 8       // vitesse de l'esquive latérale (roulade)
+const BOSS_DODGE_TIME = 0.6      // durée de l'esquive
+const BOSS_DODGE_CD = 2.2        // délai entre deux esquives
+const BOSS_ROAR_CD = 6           // délai entre deux hurlements
+const BOSS_RECOIL_SPEED = 5      // recul quand il encaisse une balle
+const BOSS_RECOIL_TIME = 0.18
 const SHOP_TYPES = ['pharmacie', 'armurerie', 'epicerie', 'boulangerie']
 const STORE_SLOTS = [-18, -12, -6, 0, 6, 12, 18]   // centres z des devantures
 const STORE_W = 5.4              // largeur d'une devanture (le long de z)
@@ -363,6 +371,7 @@ const Sfx = (() => {
     waveCleared() { ensure(); blip({ type: 'sine', f0: 520, f1: 780, dur: 0.18, gain: 0.3 }); setTimeout(() => blip({ type: 'sine', f0: 780, f1: 1040, dur: 0.22, gain: 0.3 }), 140) },
     gameOver() { ensure(); blip({ type: 'sawtooth', f0: 300, f1: 55, dur: 0.85, gain: 0.32 }) },
     explosion() { ensure(); noise({ dur: 0.7, gain: 0.6, type: 'lowpass', f: 900, sweepTo: 120 }); blip({ type: 'sine', f0: 90, f1: 30, dur: 0.7, gain: 0.4 }); blip({ type: 'square', f0: 60, f1: 25, dur: 0.5, gain: 0.3 }) },
+    roar() { ensure(); blip({ type: 'sawtooth', f0: 160, f1: 60, dur: 0.7, gain: 0.34 }); blip({ type: 'square', f0: 90, f1: 45, dur: 0.7, gain: 0.22 }); noise({ dur: 0.5, gain: 0.2, type: 'lowpass', f: 700 }) },
   }
 })()
 
@@ -616,6 +625,7 @@ const GONDOLA_D = 1.43     // profondeur native (Z) — déjà double face
 const GONDOLA_BASE = 0.95  // distance origine -> base (pour poser au sol)
 const GONDOLA_FACE = 0     // oriente la façade (0 ou Math.PI si inversé)
 useGLTF.preload(GONDOLA_URL, true)
+useGLTF.preload(BOSS_URL, true)
 
 /* Pave un rayon (w×d) de travées de gondole (rangée simple, modèle déjà double face) */
 function GondolaModel({ w, d }) {
@@ -951,13 +961,16 @@ const Bullets = forwardRef(function Bullets({ registry, killZombies, shelfRectsR
                 e.armorSpark = now            // ricochet sur le gilet, aucun dégât
                 Sfx.ricochet()
               } else if (e.boss) {
+                e.spark = now                       // éclat sur le gilet
+                e.recoilUntil = now + BOSS_RECOIL_TIME
+                e.recoilVX = b.dx * BOSS_RECOIL_SPEED
+                e.recoilVZ = b.dz * BOSS_RECOIL_SPEED
                 if (e.phase === 1) {
                   e.hp -= BULLET_DAMAGE
                   e.hitFlash = now
                   if (e.hp <= 0) { e.phase = 2; e.hp = BOSS_HP_2 }   // phase 2 : au sabre
                 } else {
-                  e.armorSpark = now            // phase 2 : les balles ne font rien
-                  Sfx.ricochet()
+                  Sfx.ricochet()                     // phase 2 : les balles ricochent (aucun dégât)
                 }
               } else {
                 e.hp -= BULLET_DAMAGE
@@ -1601,13 +1614,73 @@ function FatZombieModel({ gait, speedMul, stateRef, entryRef }) {
   )
 }
 
+/* Modèle 3D animé du BOSS (clips : run/block/attack/dodge/skill) + éclat sur coup */
+function BossModel({ stateRef, entryRef }) {
+  const { scene, animations } = useGLTF(BOSS_URL, true)
+  const cloned = useMemo(() => {
+    const c = cloneSkeleton(scene)
+    c.traverse((o) => {
+      if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; o.material = o.material.clone(); o.material.metalness = 0; o.material.roughness = 1 }
+    })
+    return c
+  }, [scene])
+  const mats = useMemo(() => { const a = []; cloned.traverse((o) => { if (o.isMesh) a.push(o.material) }); return a }, [cloned])
+  const group = useRef()
+  const spark = useRef()
+  const { actions } = useAnimations(animations, group)
+  const current = useRef(null)
+
+  useEffect(() => {
+    const a = actions['run']; if (a) { a.reset(); a.play() }
+    current.current = 'run'
+    return () => { Object.values(actions).forEach((x) => x && x.stop()) }
+  }, [actions])
+
+  useFrame((state) => {
+    const s = stateRef.current
+    const clip = s === 'attack' ? 'attack' : s === 'dodge' ? 'dodge' : s === 'skill' ? 'skill' : (s === 'block' || s === 'death') ? 'block' : 'run'
+    if (clip !== current.current && actions[clip]) {
+      const next = actions[clip], prev = actions[current.current]
+      next.reset()
+      const once = clip === 'attack' || clip === 'dodge' || clip === 'skill'
+      if (once) { next.setLoop(THREE.LoopOnce, 1); next.clampWhenFinished = true }
+      else { next.setLoop(THREE.LoopRepeat, Infinity) }
+      next.fadeIn(0.12).play()
+      if (prev && prev !== next) prev.fadeOut(0.12)
+      current.current = clip
+    }
+    const now = state.clock.elapsedTime
+    const hit = now - entryRef.current.hitFlash < 0.12
+    for (const m of mats) m.emissive.setRGB(hit ? 0.5 : 0, 0, 0)
+    if (spark.current) {
+      const sk = now - (entryRef.current.spark || -10)
+      const on = sk < 0.14
+      spark.current.visible = on
+      if (on) spark.current.scale.setScalar(0.15 + sk * 3)
+    }
+  })
+
+  return (
+    <group ref={group} position={[0, BOSS_FEET_Y, 0]} scale={BOSS_MODEL_SCALE}>
+      <primitive object={cloned} />
+      <mesh ref={spark} position={[0, 1.0, 0.28]} visible={false}>
+        <sphereGeometry args={[0.12, 8, 8]} />
+        <meshBasicMaterial color="#fff2b0" transparent opacity={0.9} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+      </mesh>
+    </group>
+  )
+}
+
+
 function Zombie({ id, spawn, armored, fat, female, boss, gait, speedMul, dying, posRef, registry, onDamage, onRemove, playing }) {
   const body = useRef()
   const visual = useRef()
   const stateRef = useRef('walk')
   const entry = useRef({
     pos: new THREE.Vector3(spawn[0], 1, spawn[1]),
-    lastHit: -10, hp: boss ? BOSS_HP_1 : fat ? FAT_HP : ZOMBIE_HP, armored, fat, boss, phase: boss ? 1 : 0, hitFlash: -10, armorSpark: -10, dying: false,
+    lastHit: -10, hp: boss ? BOSS_HP_1 : fat ? FAT_HP : ZOMBIE_HP, armored, fat, boss, phase: boss ? 1 : 0,
+    hitFlash: -10, armorSpark: -10, spark: -10, dying: false,
+    recoilUntil: 0, recoilVX: 0, recoilVZ: 0, dodgeUntil: 0, dodgeVX: 0, dodgeVZ: 0, nextDodge: 2, nextRoar: 4,
   })
 
   useEffect(() => {
@@ -1635,6 +1708,49 @@ function Zombie({ id, spawn, armored, fat, female, boss, gait, speedMul, dying, 
     if (dying || !playing) {
       const vy = body.current.linvel().y
       body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
+    } else if (boss) {
+      /* --- IA du boss : actif, esquive, hurle, recule sur coup --- */
+      const e = entry.current
+      const dx = posRef.current.x - t.x
+      const dz = posRef.current.z - t.z
+      const d = Math.hypot(dx, dz) || 1
+      const nx = dx / d, nz = dz / d
+      const vy = body.current.linvel().y
+      if (visual.current) visual.current.rotation.y = Math.atan2(nx, nz)
+
+      if (now < e.recoilUntil) {
+        body.current.setLinvel({ x: e.recoilVX, y: vy, z: e.recoilVZ }, true)
+        stateRef.current = 'block'
+      } else if (now < e.dodgeUntil) {
+        body.current.setLinvel({ x: e.dodgeVX, y: vy, z: e.dodgeVZ }, true)
+        stateRef.current = 'dodge'
+      } else if (now >= e.nextDodge && d > 2 && d < 14) {
+        // roulade latérale d'esquive
+        const side = Math.random() < 0.5 ? 1 : -1
+        e.dodgeVX = -nz * side * BOSS_DODGE_SPEED
+        e.dodgeVZ = nx * side * BOSS_DODGE_SPEED
+        e.dodgeUntil = now + BOSS_DODGE_TIME
+        e.nextDodge = now + BOSS_DODGE_CD + Math.random() * 1.5
+        stateRef.current = 'dodge'
+      } else if (now >= e.nextRoar) {
+        e.nextRoar = now + BOSS_ROAR_CD + Math.random() * 2.5
+        e.roarUntil = now + 1.0
+        Sfx.roar()
+        stateRef.current = 'skill'
+        body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
+      } else if (now < (e.roarUntil || 0)) {
+        stateRef.current = 'skill'
+        body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
+      } else if (d < CONTACT_RANGE * 1.5) {
+        stateRef.current = 'attack'
+        const sp = ZOMBIE_SPEED * BOSS_SPEED_MUL * 0.4
+        body.current.setLinvel({ x: nx * sp, y: vy, z: nz * sp }, true)
+        if (now - e.lastHit > HIT_COOLDOWN) { e.lastHit = now; onDamage(ZOMBIE_DAMAGE * 2); Sfx.hurt() }
+      } else {
+        stateRef.current = 'run'
+        const sp = ZOMBIE_SPEED * BOSS_SPEED_MUL
+        body.current.setLinvel({ x: nx * sp, y: vy, z: nz * sp }, true)
+      }
     } else {
       const dx = posRef.current.x - t.x
       const dz = posRef.current.z - t.z
@@ -1665,9 +1781,11 @@ function Zombie({ id, spawn, armored, fat, female, boss, gait, speedMul, dying, 
       linearDamping={0.5}
       ccd={fat || boss}
     >
-      <CapsuleCollider args={boss ? [1.0, 0.8] : fat ? [0.38, 0.62] : [0.4, 0.4]} />
-      <group ref={visual} scale={boss ? BOSS_SCALE : 1}>
-        {boss || fat ? (
+      <CapsuleCollider args={boss ? [0.9, 0.6] : fat ? [0.38, 0.62] : [0.4, 0.4]} />
+      <group ref={visual}>
+        {boss ? (
+          <BossModel stateRef={stateRef} entryRef={entry} />
+        ) : fat ? (
           <FatZombieModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
         ) : armored ? (
           <BobModel gait={gait} speedMul={speedMul} stateRef={stateRef} entryRef={entry} />
