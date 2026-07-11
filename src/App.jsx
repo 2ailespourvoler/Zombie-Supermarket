@@ -125,14 +125,17 @@ const BANNER_DURATION = 2.2         // durée d'affichage de l'annonce "VAGUE N"
 const waveCount = (w) => Math.min(WAVE_COUNT_MAX, WAVE_COUNT_BASE + (w - 1) * WAVE_COUNT_STEP)
 const waveDuration = (w) => Math.max(WAVE_DUR_MIN, WAVE_DURATION - (w - 1) * WAVE_DUR_STEP)
 
-/* Vue subjective (test) — touche V */
-const FPS_EYE_Y = 0.7    // hauteur des yeux au-dessus du centre du corps
-const FPS_FWD = 0.25     // caméra légèrement devant le visage (le corps reste derrière)
-const FPS_TURN_SMOOTH = 6   // amorti de la rotation (plus haut = plus réactif, plus bas = plus doux)
-const FPS_POS_SMOOTH = 10    // amorti de la position (absorbe les micro-vibrations physiques)
+/* Vue rapprochée 3ᵉ personne (touche V) — par-dessus l'épaule droite */
+const OTS_BACK = 1.2        // recul derrière le joueur (m)
+const OTS_UP = 1.5          // hauteur au-dessus du centre du joueur (≈1 m au-dessus de l'épaule)
+const OTS_RIGHT = 0.6       // décalage vers l'épaule droite
+const OTS_LOOK_AHEAD = 8    // distance du point visé devant le joueur
+const OTS_LOOK_UP = 1.1     // hauteur du point visé
+const OTS_TURN_SMOOTH = 7   // amorti de la rotation (plus haut = plus réactif)
+const OTS_POS_SMOOTH = 12   // amorti de la position
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : P5b boss réel'
+const BUILD_TAG = 'build : vue épaule (V)'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -398,21 +401,30 @@ function useKeyboard() {
 /* ---------------------------------------------------------------- */
 function FollowCamera({ target, aimRef, modeRef, shakeRef }) {
   const { camera } = useThree()
-  const fpsYaw = useRef(0)
+  const camYaw = useRef(0)
   useFrame((state, dt) => {
     const p = target.current
-    if (modeRef && modeRef.current === 'fps') {
-      // rotation amortie (chemin le plus court, gère le passage ±π)
+    if (modeRef && modeRef.current === 'shoulder') {
+      // rotation amortie (chemin le plus court)
       const tgt = aimRef ? aimRef.current : 0
-      let d = tgt - fpsYaw.current
-      d = Math.atan2(Math.sin(d), Math.cos(d))
-      fpsYaw.current += d * Math.min(1, dt * FPS_TURN_SMOOTH)
-      const fx = Math.sin(fpsYaw.current), fz = Math.cos(fpsYaw.current)
-      const eyeY = p.y + FPS_EYE_Y
-      // position lissée (absorbe la vibration du corps physique)
-      camTarget.set(p.x + fx * FPS_FWD, eyeY, p.z + fz * FPS_FWD)
-      camera.position.lerp(camTarget, Math.min(1, dt * FPS_POS_SMOOTH))
-      camera.lookAt(camera.position.x + fx * 10, eyeY, camera.position.z + fz * 10)
+      let dd = tgt - camYaw.current
+      dd = Math.atan2(Math.sin(dd), Math.cos(dd))
+      camYaw.current += dd * Math.min(1, dt * OTS_TURN_SMOOTH)
+      const y = camYaw.current
+      const fx = Math.sin(y), fz = Math.cos(y)   // avant
+      const rx = Math.cos(y), rz = -Math.sin(y)  // droite
+      // caméra : derrière + au-dessus + décalée vers l'épaule droite
+      camTarget.set(
+        p.x - fx * OTS_BACK + rx * OTS_RIGHT,
+        p.y + OTS_UP,
+        p.z - fz * OTS_BACK + rz * OTS_RIGHT,
+      )
+      camera.position.lerp(camTarget, Math.min(1, dt * OTS_POS_SMOOTH))
+      camera.lookAt(
+        p.x + fx * OTS_LOOK_AHEAD + rx * OTS_RIGHT,
+        p.y + OTS_LOOK_UP,
+        p.z + fz * OTS_LOOK_AHEAD + rz * OTS_RIGHT,
+      )
       return
     }
     camTarget.set(p.x, p.y + 14, p.z + 11)
@@ -455,13 +467,32 @@ function Lights() {
   )
 }
 
-/* Éclairage de l'arène : entrepôt sombre + projecteur sur le carré */
+/* Lampe industrielle suspendue : source + cône de lumière visible */
+function LightCone({ x, z }) {
+  return (
+    <group position={[x, 0, z]}>
+      <pointLight position={[0, 8.5, 0]} intensity={0.95} distance={17} color="#ffe6b8" />
+      <mesh position={[0, 4.5, 0]}>
+        <coneGeometry args={[2.7, 8.6, 24, 1, true]} />
+        <meshBasicMaterial color="#ffe6b8" transparent opacity={0.06} side={THREE.DoubleSide} blending={THREE.AdditiveBlending} depthWrite={false} toneMapped={false} />
+      </mesh>
+      <mesh position={[0, 8.8, 0]}>
+        <cylinderGeometry args={[0.34, 0.5, 0.4, 12]} />
+        <meshStandardMaterial color="#2a2f3a" metalness={0.5} roughness={0.6} />
+      </mesh>
+    </group>
+  )
+}
+
+/* Éclairage de l'arène : entrepôt sombre mais lisible, plusieurs cônes de lumière */
 function ArenaLights() {
+  const lamps = [[-3.4, -3.6], [3.4, -3.6], [-3.4, 3.6], [3.4, 3.6]]
   return (
     <>
-      <ambientLight intensity={0.08} />
-      <spotLight position={[0, 17, ARENA_CENTER_Z]} angle={0.62} penumbra={0.5} intensity={2.6} distance={44} castShadow color="#fff2d8" shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
-      <pointLight position={[0, 6, ARENA_CENTER_Z]} intensity={0.35} distance={18} color="#7f9dff" />
+      <ambientLight intensity={0.22} />
+      <hemisphereLight args={['#3a4256', '#0a0a10', 0.28]} />
+      <spotLight position={[0, 17, ARENA_CENTER_Z]} angle={0.7} penumbra={0.5} intensity={2.2} distance={46} castShadow color="#fff2d8" shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
+      {lamps.map(([x, z], i) => <LightCone key={i} x={x} z={ARENA_CENTER_Z + z} />)}
     </>
   )
 }
@@ -1867,11 +1898,18 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
   const nextGroan = useRef(3)
 
   const aimYaw = useRef(0)
-  const viewMode = useRef('tps')   // vue de dessus (la bascule FPS de test a été retirée)
+  const viewMode = useRef('tps')   // 'tps' (vue de dessus) ou 'shoulder' (par-dessus l'épaule, touche V)
   const pendingBanner = useRef(false)
 
   useEffect(() => { countRef.current = zombies.filter((z) => !z.dying).length }, [zombies])
   useEffect(() => { if (playing) Sfx.waveStart() }, [])
+
+  // bascule de vue avec la touche V
+  useEffect(() => {
+    const onKey = (e) => { if (e.code === 'KeyV') viewMode.current = viewMode.current === 'shoulder' ? 'tps' : 'shoulder' }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // refs synchronisées avec la zone active
   useEffect(() => { storefrontsRef.current = storefronts }, [storefronts])
@@ -1988,10 +2026,19 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         const speedMul = fat
           ? FAT_SPEED_MUL
           : 0.85 + Math.random() * 0.3 + Math.min(0.4, wave * 0.02)
-        const endZ = -(CORRIDOR_HL - 1.5)   // fond du couloir
-        // répartis sur la largeur (effet "ligne de zombies") + léger aléa
-        const frac = count > 1 ? lane / (count - 1) : 0.5
-        const sx = (frac * 2 - 1) * (CORRIDOR_HW - 1.4) + (Math.random() * 0.7 - 0.35)
+        const arena = ZONES[zoneIndex].type === 'arene'
+        let sx, endZ
+        if (arena) {
+          // autour de l'arène : apparition aux deux extrémités du couloir (nord et sud)
+          const fromNorth = Math.random() < 0.5
+          endZ = fromNorth ? -(CORRIDOR_HL - 1.5) : (CORRIDOR_HL - 1.5)
+          sx = (Math.random() * 2 - 1) * (CORRIDOR_HW - 1.4)
+        } else {
+          endZ = -(CORRIDOR_HL - 1.5)   // fond du couloir
+          // répartis sur la largeur (effet "ligne de zombies") + léger aléa
+          const frac = count > 1 ? lane / (count - 1) : 0.5
+          sx = (frac * 2 - 1) * (CORRIDOR_HW - 1.4) + (Math.random() * 0.7 - 0.35)
+        }
         setZombies((zs) => [...zs, { id: idRef.current++, spawn: [sx, endZ], armored, fat, female, gait, speedMul }])
       }
 
