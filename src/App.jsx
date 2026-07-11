@@ -126,16 +126,16 @@ const waveCount = (w) => Math.min(WAVE_COUNT_MAX, WAVE_COUNT_BASE + (w - 1) * WA
 const waveDuration = (w) => Math.max(WAVE_DUR_MIN, WAVE_DURATION - (w - 1) * WAVE_DUR_STEP)
 
 /* Vue rapprochée 3ᵉ personne (touche V) — par-dessus l'épaule, façon Fortnite */
-const OTS_BACK = 2.4        // recul derrière le joueur (m)
+const OTS_BACK = 2.9        // recul derrière le joueur (m)
 const OTS_UP = 1.05         // hauteur caméra au-dessus du centre du joueur (~juste au-dessus de la tête)
-const OTS_RIGHT = 0.7       // décalage vers l'épaule droite (le perso se cadre à gauche)
+const OTS_RIGHT = 1.0       // décalage vers l'épaule droite (le perso se cadre à gauche)
 const OTS_LOOK_AHEAD = 12   // distance du point visé devant le joueur (regard vers l'avant, pas vers le sol)
 const OTS_LOOK_UP = 0.6     // hauteur du point visé (légèrement sous la caméra -> plongée douce)
 const OTS_TURN_SMOOTH = 8   // amorti de la rotation (plus haut = plus réactif)
 const OTS_POS_SMOOTH = 14   // amorti de la position
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : vue épaule Fortnite (V)'
+const BUILD_TAG = 'build : épaule + découplage'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
@@ -412,7 +412,7 @@ function FollowCamera({ target, aimRef, modeRef, shakeRef }) {
       camYaw.current += dd * Math.min(1, dt * OTS_TURN_SMOOTH)
       const y = camYaw.current
       const fx = Math.sin(y), fz = Math.cos(y)   // avant
-      const rx = Math.cos(y), rz = -Math.sin(y)  // droite
+      const rx = -Math.cos(y), rz = Math.sin(y)  // droite (perso cadré à gauche)
       // caméra : derrière + au-dessus + décalée vers l'épaule droite
       camTarget.set(
         p.x - fx * OTS_BACK + rx * OTS_RIGHT,
@@ -1200,7 +1200,7 @@ function PlayerModel({ locomotionRef, attackRef, weaponRef }) {
   )
 }
 
-function Player({ posRef, bodyRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, uziAmmoRef, hasPistolRef, hasUziRef, hungerRef, onWeapon, onAmmo, onUziAmmo, playing, aimRef }) {
+function Player({ posRef, bodyRef, registry, killZombies, bulletsRef, shelfRectsRef, ammoRef, uziAmmoRef, hasPistolRef, hasUziRef, hungerRef, onWeapon, onAmmo, onUziAmmo, playing, aimRef, viewModeRef }) {
   const body = useRef()
   const visual = useRef()
   const keys = useKeyboard()
@@ -1296,8 +1296,9 @@ function Player({ posRef, bodyRef, registry, killZombies, bulletsRef, shelfRects
     let mag = Math.hypot(mx, mz)
     if (mag > 1) { mx /= mag; mz /= mag; mag = 1 }
 
-    // orientation — face au déplacement si on bouge, sinon visée (souris / stick droit) à l'arrêt
-    if (mag > 0.1) {
+    // orientation — mode épaule : la visée suit TOUJOURS la souris (découplée du déplacement)
+    const fortnite = viewModeRef && viewModeRef.current === 'shoulder'
+    if (!fortnite && mag > 0.1) {
       yaw.current = Math.atan2(mx, mz)
     } else {
       raycaster.setFromCamera(state.pointer, camera)
@@ -1318,8 +1319,15 @@ function Player({ posRef, bodyRef, registry, killZombies, bulletsRef, shelfRects
     const vy = body.current.linvel().y
     let speed = PLAYER_SPEED
     if (hungerRef.current < LOW_HUNGER) speed *= SLOW_FACTOR
+    // mode épaule : déplacement relatif à la visée (avancer/reculer/strafe façon Fortnite)
+    let wmx = mx, wmz = mz
+    if (fortnite && mag > 0.001) {
+      const y = yaw.current
+      wmx = (-mz) * Math.sin(y) + mx * Math.cos(y)
+      wmz = (-mz) * Math.cos(y) - mx * Math.sin(y)
+    }
     if (mag > 0.001) {
-      body.current.setLinvel({ x: mx * speed, y: vy, z: mz * speed }, true)
+      body.current.setLinvel({ x: wmx * speed, y: vy, z: wmz * speed }, true)
     } else {
       body.current.setLinvel({ x: 0, y: vy, z: 0 }, true)
     }
@@ -2281,6 +2289,7 @@ const Game = memo(function Game({ playing, onDamage, onHeal, onKill, onWeapon, o
         onUziAmmo={onUziAmmo}
         playing={playing}
         aimRef={aimYaw}
+        viewModeRef={viewMode}
       />
       {zombies.map((z) => (
         <Zombie
