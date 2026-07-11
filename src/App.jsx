@@ -126,13 +126,13 @@ const waveCount = (w) => Math.min(WAVE_COUNT_MAX, WAVE_COUNT_BASE + (w - 1) * WA
 const waveDuration = (w) => Math.max(WAVE_DUR_MIN, WAVE_DURATION - (w - 1) * WAVE_DUR_STEP)
 
 /* Vue rapprochée 3ᵉ personne (touche V) — par-dessus l'épaule, façon Fortnite */
-const OTS_BACK = 2.9        // recul derrière le joueur (m)
-const OTS_UP = 1.05         // hauteur caméra au-dessus du centre du joueur (~juste au-dessus de la tête)
-const OTS_RIGHT = 1.0       // décalage vers l'épaule droite (le perso se cadre à gauche)
+const OTS_BACK = 3        // recul derrière le joueur (m)
+const OTS_UP = 1.25         // hauteur caméra au-dessus du centre du joueur (~juste au-dessus de la tête)
+const OTS_RIGHT = 0.9       // décalage vers l'épaule droite (le perso se cadre à gauche)
 const OTS_LOOK_AHEAD = 12   // distance du point visé devant le joueur (regard vers l'avant, pas vers le sol)
 const OTS_LOOK_UP = 0.6     // hauteur du point visé (légèrement sous la caméra -> plongée douce)
-const OTS_TURN_SMOOTH = 8   // amorti de la rotation (plus haut = plus réactif)
-const OTS_POS_SMOOTH = 14   // amorti de la position
+const OTS_TURN_SMOOTH = 4   // amorti de la rotation (plus haut = plus réactif)
+const OTS_POS_SMOOTH = 10   // amorti de la position
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
 const BUILD_TAG = 'build : épaule + découplage'
