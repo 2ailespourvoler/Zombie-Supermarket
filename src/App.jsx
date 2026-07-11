@@ -125,17 +125,17 @@ const BANNER_DURATION = 2.2         // durée d'affichage de l'annonce "VAGUE N"
 const waveCount = (w) => Math.min(WAVE_COUNT_MAX, WAVE_COUNT_BASE + (w - 1) * WAVE_COUNT_STEP)
 const waveDuration = (w) => Math.max(WAVE_DUR_MIN, WAVE_DURATION - (w - 1) * WAVE_DUR_STEP)
 
-/* Vue rapprochée 3ᵉ personne (touche V) — par-dessus l'épaule droite */
-const OTS_BACK = 1.2        // recul derrière le joueur (m)
-const OTS_UP = 1.5          // hauteur au-dessus du centre du joueur (≈1 m au-dessus de l'épaule)
-const OTS_RIGHT = 0.6       // décalage vers l'épaule droite
-const OTS_LOOK_AHEAD = 8    // distance du point visé devant le joueur
-const OTS_LOOK_UP = 1.1     // hauteur du point visé
-const OTS_TURN_SMOOTH = 7   // amorti de la rotation (plus haut = plus réactif)
-const OTS_POS_SMOOTH = 12   // amorti de la position
+/* Vue rapprochée 3ᵉ personne (touche V) — par-dessus l'épaule, façon Fortnite */
+const OTS_BACK = 2.8        // recul derrière le joueur (m)
+const OTS_UP = 2.0          // hauteur de la caméra au-dessus du centre du joueur
+const OTS_RIGHT = 0.65      // décalage vers l'épaule droite (le perso se cadre à gauche)
+const OTS_LOOK_AHEAD = 10   // distance du point visé devant le joueur
+const OTS_LOOK_UP = 0.5     // hauteur du point visé (plus bas que la caméra -> légère plongée)
+const OTS_TURN_SMOOTH = 8   // amorti de la rotation (plus haut = plus réactif)
+const OTS_POS_SMOOTH = 14   // amorti de la position
 
 /* Marqueur de build affiché à l'écran (pour vérifier quel déploiement est en ligne) */
-const BUILD_TAG = 'build : vue épaule (V)'
+const BUILD_TAG = 'build : vue épaule Fortnite (V)'
 
 /* Rayons poussables */
 const PUSH_RANGE = 1.1          // distance à laquelle un zombie "pousse"
